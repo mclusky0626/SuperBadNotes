@@ -1,0 +1,74 @@
+//
+//  SettingsView.swift
+//  BadNotes
+//
+//  설정: 필기 방식(직접 필기 / 레이어), 입력, 테마 바로가기, 정보.
+//
+
+import SwiftUI
+
+struct SettingsView: View {
+    @Bindable var settings: AppSettings
+    let openTheme: () -> Void
+    let openLog: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    ForEach(AppSettings.EditMode.allCases) { mode in
+                        Button {
+                            settings.editMode = mode
+                        } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: settings.editMode == mode ? "checkmark.circle.fill" : "circle")
+                                    .font(.title3)
+                                    .foregroundStyle(settings.editMode == mode ? Color.accentColor : Color.secondary)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(mode == .direct ? "\(mode.title) (기본)" : mode.title)
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                    Text(mode.detail)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text("필기 방식")
+                }
+
+                Section {
+                    Toggle("손가락으로도 쓰기", isOn: $settings.fingerDrawing)
+                    Toggle("두 손가락 탭으로 실행 취소", isOn: $settings.tapToUndo)
+                    Toggle("형광펜 곧게 긋기", isOn: $settings.straightHighlighter)
+                } header: {
+                    Text("입력")
+                } footer: {
+                    Text("손가락으로 쓰기를 켜면 스크롤과 확대는 두 손가락으로 해요. 세 손가락 탭은 다시 실행이에요. 형광펜 곧게 긋기를 켜면 거의 곧은 형광펜 줄을 곧게 펴 주고, 수평에 가까우면 수평으로 맞춰요. Apple Pencil 두 번 탭은 시스템 설정을 따라 지우개로 바꿔요.")
+                }
+
+                Section("모양") {
+                    Button("테마 바꾸기…", action: openTheme)
+                }
+
+                Section("정보") {
+                    LabeledContent("버전", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "-")
+                    LabeledContent("PDF 위치", value: "파일 › 나의 iPad › BadNotes")
+                    Button("로그 보기", action: openLog)
+                }
+            }
+            .navigationTitle("설정")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("완료") { dismiss() }
+                }
+            }
+        }
+    }
+}

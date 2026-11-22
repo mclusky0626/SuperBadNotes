@@ -47,6 +47,12 @@ nonisolated enum AppPaths {
         return String(path.dropFirst(root.count + 1))
     }
 
+    /// 서재(Documents) 안에 있는 파일인지
+    static func isInsideDocuments(_ url: URL) -> Bool {
+        let root = documents.resolvingSymlinksInPath().standardizedFileURL.path
+        return url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(root + "/")
+    }
+
     /// 문서마다 고유한 폴더 이름: 읽을 수 있는 이름 + 경로 해시
     static func key(for documentURL: URL) -> String {
         let digest = SHA256.hash(data: Data(relativePath(documentURL).utf8))

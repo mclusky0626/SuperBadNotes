@@ -40,7 +40,11 @@ nonisolated enum SelfTest {
             try engineTests(root: root, results)
             try migrationTests(root: root, results)
             journalTests(root: root, results)
+            inkEngineTests(results)
+            highlighterTests(results)
+            await pencilKitMatchTests(results)
             try await documentTests(root: root, results)
+            try await notebookTests(root: root, results)
         } catch {
             results.check("예외 없이 끝남", false, "\(error)")
         }
@@ -191,6 +195,278 @@ nonisolated enum SelfTest {
         } catch {
             r.check("복구 기록 쓰기", false, "\(error)")
         }
+    }
+
+    // MARK: 직접 필기 엔진
+
+    private static func inkEngineTests(_ r: Results) {
+        func sample(_ i: Int, force: CGFloat?) -> InputSample {
+            InputSample(location: CGPoint(x: 10 + CGFloat(i) * 4, y: 100), time: Double(i) * 0.01,
+                        force: force, azimuth: 0, altitude: .pi / 2)
+        }
+
+        // 입력 → 획
+        var brush = StrokeBuilder(inkType: .pen, color: .black, width: 3, pressureRange: 0.3...1.6, startTime: 0)
+        for i in 0...50 { brush.add(sample(i, force: i < 25 ? 0.08 : 0.7)) }
+        let brushWidths = InkRenderer.sample(brush.makeStroke()!).points.map(\.width)
+        r.check("붓펜: 필압에 따라 굵기가 변함",
+                (brushWidths.min() ?? 0) < (brushWidths.max() ?? 0) * 0.5,
+                "\(brushWidths.min() ?? 0) ~ \(brushWidths.max() ?? 0)")
+
+        var ballpoint = StrokeBuilder(inkType: .monoline, color: .black, width: 2.2, startTime: 0)
+        for i in 0...50 { ballpoint.add(sample(i, force: i < 25 ? 0.08 : 0.7)) }
+        let ballpointWidths = InkRenderer.sample(ballpoint.makeStroke()!).points.map(\.width)
+        r.check("볼펜: 굵기 일정하고 고른 굵기 그대로 (2.2pt)",
+                ballpointWidths.allSatisfy { abs($0 - 2.2) < 0.01 },
+                "\(ballpointWidths.min() ?? 0) ~ \(ballpointWidths.max() ?? 0)")
+
+        var marker = StrokeBuilder(inkType: .marker, color: .yellow, width: 16, startTime: 0)
+        for i in 0...50 { marker.add(sample(i, force: 0.5)) }
+        let markerWidths = InkRenderer.sample(marker.makeStroke()!).points.map(\.width)
+        r.check("형광펜: 가로로 그으면 고른 굵기 그대로 (16pt)",
+                markerWidths.allSatisfy { abs($0 - 16) < 0.05 }, "\(markerWidths.first ?? 0)")
+
+        var dot = StrokeBuilder(inkType: .pen, color: .black, width: 3, startTime: 0)
+        dot.add(sample(0, force: nil))
+        r.check("콕 찍은 점도 획이 됨", dot.makeStroke()?.path.count == 2)
+
+        // 지우개
+        let horizontal = line(.pen, .black, CGPoint(x: 0, y: 100), CGPoint(x: 200, y: 100), width: 4)
+        let sampled = InkRenderer.sample(horizontal)
+        let pieces = StrokeEditing.erase(horizontal, sampled: sampled, from: CGPoint(x: 100, y: 80),
+                                         to: CGPoint(x: 100, y: 120), radius: 5)
+        r.check("부분 지우개: 가운데를 지우면 두 조각", pieces?.count == 2, "\(pieces?.count ?? -1)")
+        if let pieces, pieces.count == 2 {
+            let left = pieces[0].renderBounds, right = pieces[1].renderBounds
+            r.check("부분 지우개: 지운 자리는 비어 있음", left.maxX < 96 && right.minX > 104, "\(left) / \(right)")
+        }
+        r.check("부분 지우개: 안 닿으면 그대로",
+                StrokeEditing.erase(horizontal, sampled: sampled, from: CGPoint(x: 100, y: 150),
+                                    to: CGPoint(x: 120, y: 150), radius: 5) == nil)
+        r.check("획 지우개: 닿으면 통째로",
+                StrokeEditing.touches(sampled, from: CGPoint(x: 50, y: 90), to: CGPoint(x: 50, y: 110), radius: 3))
+
+        // 올가미
+        let far = InkRenderer.sample(line(.pen, .black, CGPoint(x: 0, y: 400), CGPoint(x: 200, y: 400), width: 4))
+        let picked = StrokeEditing.select([sampled, far], lasso: CGPath(rect: CGRect(x: -10, y: 50, width: 230, height: 100),
+                                                                       transform: nil))
+        r.check("올가미: 안에 있는 획만 고름", picked == [0], "\(picked)")
+        let moved = StrokeEditing.translated(horizontal, by: CGVector(dx: 30, dy: 40))
+        r.check("옮기기: 위치가 바뀜",
+                abs(moved.renderBounds.minX - horizontal.renderBounds.minX - 30) < 0.5
+                    && abs(moved.renderBounds.minY - horizontal.renderBounds.minY - 40) < 0.5,
+                "\(moved.renderBounds)")
+        r.check("복제: 원본과 다른 획으로 구분됨",
+                StrokeKey(StrokeEditing.duplicated(horizontal, by: .zero)) != StrokeKey(horizontal))
+
+        // 페이지 필기: 더한 획 자리만 다시 그림
+        let ink = PageInk(drawing: PKDrawing(strokes: [horizontal]))
+        _ = ink.renderStrokes()
+        let added = line(.pen, .black, CGPoint(x: 0, y: 300), CGPoint(x: 200, y: 300), width: 4)
+        let dirty = ink.replace(with: PKDrawing(strokes: [horizontal, added]))
+        r.check("획을 더하면 그 자리만 다시 그림", dirty.minY > 290 && dirty.maxY < 310, "\(dirty)")
+        r.check("같은 획은 같은 키 (다시 계산 안 함)", StrokeKey(horizontal) == StrokeKey(horizontal))
+        r.check("형광펜은 반투명으로 그림",
+                InkRenderer.sample(line(.marker, .systemYellow, .zero, CGPoint(x: 50, y: 0), width: 12)).translucent)
+    }
+
+    // MARK: 형광펜
+
+    private static func highlighterTests(_ r: Results) {
+        func sample(_ p: CGPoint, _ i: Int) -> InputSample {
+            InputSample(location: p, time: Double(i) * 0.01, force: 0.5, azimuth: 0, altitude: .pi / 2)
+        }
+        // 살짝 흔들리며 거의 수평으로 그은 줄 → 곧은 수평선
+        var wobbly = StrokeBuilder(inkType: .monoline, color: .yellow.withAlphaComponent(0.5), width: 16, startTime: 0)
+        for i in 0...60 {
+            wobbly.add(sample(CGPoint(x: 20 + CGFloat(i) * 5, y: 100 + sin(CGFloat(i) / 3) * 2 + CGFloat(i) * 0.05), i))
+        }
+        let straight = wobbly.straightened()?.makeStroke()
+        let ys = straight?.path.map(\.location.y) ?? []
+        r.check("형광펜: 거의 곧은 줄은 곧은 수평선으로", !ys.isEmpty && (ys.max()! - ys.min()!) < 0.01,
+                "\(ys.min() ?? -1) ~ \(ys.max() ?? -1)")
+
+        // 지그재그는 그대로
+        var zigzag = StrokeBuilder(inkType: .monoline, color: .yellow, width: 16, startTime: 0)
+        for i in 0...40 { zigzag.add(sample(CGPoint(x: 20 + CGFloat(i) * 6, y: 100 + (i % 2 == 0 ? 0 : 25)), i)) }
+        r.check("형광펜: 지그재그는 펴지 않음", zigzag.straightened() == nil)
+
+        // 형광펜 모양: 반투명 + 곱하기 (밑의 글자가 또렷), 방향과 상관없이 같은 굵기
+        if let stroke = straight {
+            let s = InkRenderer.sample(stroke)
+            r.check("형광펜: 반투명 곱하기로 그림", s.translucent && s.blend == .multiply, "\(s.alpha) \(s.blend.rawValue)")
+            r.check("형광펜: 고른 굵기 그대로 (16pt)", s.points.allSatisfy { abs($0.width - 16) < 0.05 },
+                    "\(s.points.first?.width ?? 0)")
+        }
+        var vertical = StrokeBuilder(inkType: .monoline, color: .yellow.withAlphaComponent(0.5), width: 16, startTime: 0)
+        for i in 0...40 { vertical.add(sample(CGPoint(x: 100, y: 20 + CGFloat(i) * 5), i)) }
+        let verticalWidths = vertical.makeStroke().map { InkRenderer.sample($0).points.map(\.width) } ?? []
+        r.check("형광펜: 세로로 그어도 같은 굵기", verticalWidths.allSatisfy { abs($0 - 16) < 0.05 },
+                "\(verticalWidths.first ?? 0)")
+
+        // 펜을 뗄 때 깜빡임 방지: 타일이 그린 영역 기록
+        let ink = PageInk(drawing: PKDrawing())
+        let key = StrokeKey(straight ?? line(.pen, .black, .zero, CGPoint(x: 10, y: 0), width: 4))
+        ink.markPending([key])
+        ink.recordDrawn(CGRect(x: 0, y: 0, width: 256, height: 256), keys: [key])
+        r.check("깜빡임 방지: 막 그린 영역은 바로 지우지 않음", ink.coveredRects(for: key).isEmpty)
+        Thread.sleep(forTimeInterval: 0.08)
+        r.check("깜빡임 방지: 조금 뒤 타일이 그린 영역만큼 지움", ink.coveredRects(for: key).count == 1)
+        ink.clearPending(key)
+        r.check("깜빡임 방지: 다 끝나면 기록 정리", ink.coveredRects(for: key).isEmpty)
+    }
+
+    // MARK: 노트북
+
+    @MainActor
+    private static func notebookTests(root: URL, _ r: Results) async throws {
+        let library = LibraryStore.shared
+        let folder = root.appendingPathComponent("Library", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        let paper = PaperSpec(template: .ruledWide, tone: .yellow, size: .a4Portrait)
+        let url = try library.createNotebook(name: "점검 노트", cover: .forest, paper: paper, in: folder)
+        guard let document = PDFDocument(url: url) else { throw TestError(description: "노트북 PDF 못 염") }
+        r.check("노트북: 표지 + 종이 한 장", document.pageCount == 2, "\(document.pageCount)")
+        r.check("노트북: 종이 정보가 PDF에 들어감",
+                PaperSpec.from(documentAttributes: document.documentAttributes) == paper,
+                "\(String(describing: document.documentAttributes?["Keywords"]))")
+        if let cover = document.page(at: 0), let sheet = document.page(at: 1) {
+            keep(render(cover), as: "notebook-cover.png")
+            keep(render(sheet), as: "notebook-sheet.png")
+            keep(url, as: "notebook.pdf")
+            let coverColor = rgb(render(cover), at: CGPoint(x: 400, y: 600))
+            r.check("노트북: 표지가 칠해짐 (숲색)", coverColor.g > coverColor.r && coverColor.r < 0.4, "\(coverColor)")
+            // 넓은 줄: 첫 줄 y=80, 간격 32 → 112번째 줄은 y=80+32*1=112
+            let onLine = luminance(render(sheet), at: CGPoint(x: 300, y: 112))
+            let between = luminance(render(sheet), at: CGPoint(x: 300, y: 96))
+            r.check("노트북: 줄친 종이에 줄이 있음", onLine < between - 0.03, "줄 \(onLine) / 사이 \(between)")
+        }
+
+        // 저장 엔진으로 페이지 덧붙이기 + 그 페이지에 필기
+        let d = PKDrawing(strokes: [line(.pen, .black, CGPoint(x: 100, y: 200), CGPoint(x: 300, y: 200), width: 6)])
+        _ = try PDFInkWriter.apply([2: d], appending: [PaperRenderer.pagePDF(paper)], to: url)
+        let appended = try NoteLoader.load(url)
+        r.check("페이지 덧붙이기: 쪽수 늘어남", appended.pdf.pageCount == 3, "\(appended.pdf.pageCount)")
+        r.check("페이지 덧붙이기: 새 페이지 필기 저장", appended.drawings[2]?.strokes.count == 1)
+        r.check("페이지 덧붙이기: 종이 정보 유지",
+                PaperSpec.from(documentAttributes: appended.pdf.documentAttributes) == paper)
+
+        // 열린 문서에서 페이지 추가 → 같은 종이로, 저장까지
+        LegacyMigration.skipForTesting()
+        let note = try await NoteDocument.open(url)
+        r.check("열린 노트북: 노트북으로 알아봄", note.isNotebook)
+        let added = note.appendPage()
+        note.update(d, page: added ?? 0)
+        await note.flush(reason: "점검")
+        let reloaded = try NoteLoader.load(url)
+        r.check("열린 노트북: 페이지 추가가 파일에 저장", reloaded.pdf.pageCount == 4 && added == 3,
+                "\(reloaded.pdf.pageCount) / \(added ?? -1)")
+        r.check("열린 노트북: 새 페이지 필기도 저장", reloaded.drawings[3]?.strokes.count == 1)
+        defer {
+            let key = AppPaths.key(for: url)
+            try? FileManager.default.removeItem(at: AppPaths.backups.appendingPathComponent(key))
+            try? FileManager.default.removeItem(at: AppPaths.journal.appendingPathComponent(key))
+        }
+
+        // 서재: 같은 이름이면 번호 붙이기, 이름 바꾸기·옮기기에 즐겨찾기가 따라감
+        let second = try library.createNotebook(name: "점검 노트", cover: nil, paper: paper, in: folder)
+        r.check("서재: 같은 이름은 번호 붙임", second.lastPathComponent == "점검 노트 2.pdf", second.lastPathComponent)
+        library.toggleFavorite(second)
+        let renamed = try library.rename(LibraryItem(url: second, name: "점검 노트 2", modified: Date(),
+                                                     isFolder: false, childCount: 0), to: "새 이름")
+        r.check("서재: 이름 바꾸면 즐겨찾기 따라감", library.isFavorite(renamed) && !library.isFavorite(second))
+        let sub = try library.createFolder(named: "하위", in: folder)
+        let moved = try library.move(LibraryItem(url: renamed, name: "새 이름", modified: Date(), isFolder: false,
+                                                 childCount: 0), to: sub)
+        r.check("서재: 옮기면 즐겨찾기 따라감", library.isFavorite(moved) && moved.deletingLastPathComponent().lastPathComponent == "하위")
+        library.toggleFavorite(moved)
+        let listed = LibraryStore.sorted(LibraryStore.scan(folder), by: .modified)
+        r.check("서재: 폴더 먼저, 문서는 PDF만", listed.first?.isFolder == true && listed.filter { !$0.isFolder }.count == 1,
+                "\(listed.map(\.name))")
+    }
+
+    // MARK: PencilKit과 똑같이 보이는지
+
+    /// 같은 획을 PencilKit(레이어 모드)과 우리 렌더러(직접 필기 모드·PDF)로 그려서 굵기를 비교
+    @MainActor
+    private static func pencilKitMatchTests(_ r: Results) {
+        let cases: [(String, PKInk.InkType, CGFloat, Bool, CGFloat)] = [
+            ("펜", .pen, 5, false, 0),
+            ("볼펜", .monoline, 3.1, false, 0),
+            ("형광펜 가로", .marker, 20, false, 0),
+            ("형광펜 세로", .marker, 20, true, 0),
+            ("만년필 가로", .fountainPen, 8, false, 0),
+            ("만년필 세로", .fountainPen, 8, true, 0),
+            ("만년필 비스듬한 펜촉", .fountainPen, 8, false, .pi / 4),
+        ]
+        let frame = CGRect(x: 0, y: 0, width: 160, height: 160)
+        if ProcessInfo.processInfo.arguments.contains("-BNCalibrate") {
+            for size in [CGFloat(10), 20, 33, 50] {
+                var line = "[SELFTEST] INFO 형광펜 크기 \(size):"
+                for vertical in [false, true] {
+                    let pts = (0...60).map { i -> PKStrokePoint in
+                        let t = CGFloat(i) * 2
+                        return PKStrokePoint(location: vertical ? CGPoint(x: 80, y: 20 + t) : CGPoint(x: 20 + t, y: 80),
+                                             timeOffset: Double(i) * 0.005, size: CGSize(width: size, height: size),
+                                             opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2, secondaryScale: 1)
+                    }
+                    let s = PKStroke(ink: PKInk(.marker, color: .black),
+                                     path: PKStrokePath(controlPoints: pts, creationDate: Date()),
+                                     transform: .identity, mask: nil, randomSeed: 11)
+                    let img = PKDrawing(strokes: [s]).image(from: frame, scale: 4)
+                    line += String(format: " %@ %.2f", vertical ? "세로" : "가로", thickness(img, vertical: vertical))
+                }
+                print(line)
+            }
+        }
+        for (name, ink, size, vertical, azimuth) in cases {
+            let points = (0...60).map { i -> PKStrokePoint in
+                let t = CGFloat(i) * 2
+                return PKStrokePoint(location: vertical ? CGPoint(x: 80, y: 20 + t) : CGPoint(x: 20 + t, y: 80),
+                                     timeOffset: Double(i) * 0.005, size: CGSize(width: size, height: size),
+                                     opacity: 1, force: 1, azimuth: azimuth, altitude: .pi / 2, secondaryScale: 1)
+            }
+            let stroke = PKStroke(ink: PKInk(ink, color: .black),
+                                  path: PKStrokePath(controlPoints: points, creationDate: Date()),
+                                  transform: .identity, mask: nil, randomSeed: 11)
+            let pencilKit = PKDrawing(strokes: [stroke]).image(from: frame, scale: 4)
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 4
+            format.opaque = false
+            let ours = UIGraphicsImageRenderer(size: frame.size, format: format).image { ctx in
+                InkRenderer.draw(InkRenderer.sample(stroke), in: ctx.cgContext, smooth: true)
+            }
+            let a = thickness(pencilKit, vertical: vertical)
+            let b = thickness(ours, vertical: vertical)
+            r.check("PencilKit과 같은 굵기 (\(name))", abs(a - b) <= max(0.75, a * 0.15),
+                    "PencilKit \(String(format: "%.2f", a))pt / 우리 \(String(format: "%.2f", b))pt")
+        }
+    }
+
+    /// 획 가운데를 가로지르는 줄에서 잉크가 칠해진 길이 (pt)
+    @MainActor
+    private static func thickness(_ image: UIImage, vertical: Bool) -> CGFloat {
+        guard let cg = image.cgImage else { return -1 }
+        let w = cg.width, h = cg.height
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        let drawn: Bool = pixels.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(data: buffer.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                          bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drawn else { return -1 }
+        var count = 0
+        if vertical {
+            let y = h / 2
+            for x in 0..<w where pixels[(y * w + x) * 4 + 3] > 64 { count += 1 }
+        } else {
+            let x = w / 2
+            for y in 0..<h where pixels[(y * w + x) * 4 + 3] > 64 { count += 1 }
+        }
+        return CGFloat(count) / (CGFloat(w) / image.size.width)
     }
 
     // MARK: 열린 문서 (자동 저장, 복구 기록, 실패 후 재시도)

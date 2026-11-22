@@ -39,11 +39,22 @@ nonisolated enum PDFInkWriter {
     }
 
     /// `pages`의 필기로 해당 페이지들을 바꿔서 `url`에 저장. 빈 PKDrawing은 그 페이지 필기 삭제.
-    static func apply(_ pages: [Int: PKDrawing], to url: URL) throws -> Report {
+    /// `appending`: 맨 뒤에 붙일 페이지들 (한 장짜리 PDF 데이터). 필기보다 먼저 붙여서 새 페이지 필기도 같이 저장됨
+    static func apply(_ pages: [Int: PKDrawing], appending newPages: [Data] = [], to url: URL) throws -> Report {
         let start = Date()
         let data = try NoteLoader.coordinatedRead(url)
         guard let document = PDFDocument(data: data) else { throw WriteError.unreadable }
         if document.isLocked { throw WriteError.locked }
+
+        // 페이지를 넘겨준 문서는 쓰기가 끝날 때까지 살려 둠
+        var sources: [PDFDocument] = []
+        for pageData in newPages {
+            guard let source = PDFDocument(data: pageData), let page = source.page(at: 0) else {
+                throw WriteError.unreadable
+            }
+            sources.append(source)
+            document.insert(page, at: document.pageCount)
+        }
 
         for (index, drawing) in pages.sorted(by: { $0.key < $1.key }) {
             guard index >= 0, index < document.pageCount, let page = document.page(at: index) else {
@@ -68,7 +79,8 @@ nonisolated enum PDFInkWriter {
         try verify(temp, pageCount: document.pageCount, expected: pages)
         let bytes = (try? temp.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         try replace(url, with: temp)
-        return Report(pages: pages.count, bytes: bytes, seconds: Date().timeIntervalSince(start))
+        withExtendedLifetime(sources) {}
+        return Report(pages: pages.count + newPages.count, bytes: bytes, seconds: Date().timeIntervalSince(start))
     }
 
     private static func verify(_ url: URL, pageCount: Int, expected: [Int: PKDrawing]) throws {

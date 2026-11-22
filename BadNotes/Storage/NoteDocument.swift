@@ -29,7 +29,14 @@ final class NoteDocument {
 
     var title: String { url.deletingPathExtension().lastPathComponent }
     var pageCount: Int { pdf.pageCount }
-    var hasUnsavedChanges: Bool { !dirty.isEmpty }
+    var hasUnsavedChanges: Bool { !dirty.isEmpty || !pendingAppends.isEmpty }
+    /// 노트북이면 종이 정보 (PDF 키워드에서 읽음). 그냥 PDF면 nil
+    @ObservationIgnored private(set) var paperSpec: PaperSpec?
+    var isNotebook: Bool { paperSpec != nil }
+    /// 첫 장이 표지인 노트북 (처음 열 때 표지 다음 장부터 보여 줌)
+    @ObservationIgnored private(set) var hasCover = false
+    /// PDF 타일을 그리는 동안 페이지가 들어오지 않게 (읽기 여럿 / 쓰기 하나)
+    nonisolated let renderLock = ReadWriteLock()
 
     /// 계속 그리고 있어도 이 시간이 지나면 저장
     private static let maxUnsavedSeconds: TimeInterval = 20
@@ -46,6 +53,8 @@ final class NoteDocument {
     @ObservationIgnored private var backedUpThisSession = false
     @ObservationIgnored private let saveDelay: Duration
     @ObservationIgnored private var retryDelay: Duration = .seconds(5)
+    /// 아직 파일에 안 붙인 새 페이지 (한 장짜리 PDF 데이터)
+    @ObservationIgnored private var pendingAppends: [Data] = []
     @ObservationIgnored private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
 
     // MARK: 열기
@@ -68,6 +77,8 @@ final class NoteDocument {
         self.pdf = opened.loaded.pdf
         self.drawings = opened.loaded.drawings
         self.journal = journal
+        self.paperSpec = PaperSpec.from(documentAttributes: opened.loaded.pdf.documentAttributes)
+        self.hasCover = PaperSpec.hasCover(opened.loaded.pdf.documentAttributes)
         // 큰 파일일수록 저장 간격을 늘림 (10MB당 1.5초, 3~15초)
         let seconds = min(15, max(3, Double(opened.fileSize) / 10_000_000 * 1.5))
         self.saveDelay = .milliseconds(Int(seconds * 1000))
@@ -126,10 +137,39 @@ final class NoteDocument {
         while isSaving {
             try? await Task.sleep(for: .milliseconds(50))
         }
-        if !dirty.isEmpty {
+        if hasUnsavedChanges {
             Log.info("저장 (\(reason))")
             await save()
         }
+    }
+
+    // MARK: 페이지 추가
+
+    /// 맨 뒤에 새 페이지. 노트북이면 같은 종이, 그냥 PDF면 마지막 페이지 크기의 흰 종이.
+    /// 화면용 문서에는 바로 넣고, 파일에는 곧 저장. 새 페이지 번호를 돌려줌
+    @discardableResult
+    func appendPage() -> Int? {
+        let spec = paperSpec ?? blankPaperMatchingLastPage()
+        let data = PaperRenderer.pagePDF(spec)
+        guard let source = PDFDocument(data: data), let page = source.page(at: 0) else {
+            Log.error("새 페이지를 만들지 못함")
+            return nil
+        }
+        renderLock.write {
+            pdf.insert(page, at: pdf.pageCount)
+        }
+        pendingAppends.append(data)
+        if dirtySince == nil { dirtySince = Date() }
+        if !isSaving { saveState = .pending }
+        Log.info("페이지 추가: \(pdf.pageCount)쪽")
+        scheduleSave(after: .milliseconds(300))
+        return pdf.pageCount - 1
+    }
+
+    private func blankPaperMatchingLastPage() -> PaperSpec {
+        let size = pdf.page(at: pdf.pageCount - 1).map { PageGeometry(page: $0).canvasSize }
+            ?? PaperSpec.Size.a4Portrait.points
+        return PaperSpec(template: .blank, tone: .white, width: size.width, height: size.height)
     }
 
     // MARK: 복구 기록
@@ -160,7 +200,7 @@ final class NoteDocument {
     // MARK: PDF 저장
 
     private func scheduleSave(after delay: Duration? = nil) {
-        guard !dirty.isEmpty else { return }
+        guard hasUnsavedChanges else { return }
         let overdue = dirtySince.map { Date().timeIntervalSince($0) > Self.maxUnsavedSeconds } ?? false
         let wait = delay ?? (overdue ? .zero : saveDelay)
         saveTimer?.cancel()
@@ -172,11 +212,12 @@ final class NoteDocument {
     }
 
     private func save() async {
-        guard !dirty.isEmpty, !isSaving else { return }
+        guard hasUnsavedChanges, !isSaving else { return }
         isSaving = true
         saveState = .saving
         let pages = Dictionary(uniqueKeysWithValues: dirty.map { ($0, drawing(for: $0)) })
         let revisions = Dictionary(uniqueKeysWithValues: dirty.map { ($0, revision[$0] ?? 0) })
+        let appends = pendingAppends
         let url = url
         let needsBackup = !backedUpThisSession
 
@@ -188,7 +229,7 @@ final class NoteDocument {
                     Log.warn("백업 실패 (저장은 계속함): \(error.localizedDescription)")
                 }
             }
-            return Result { try PDFInkWriter.apply(pages, to: url) }
+            return Result { try PDFInkWriter.apply(pages, appending: appends, to: url) }
         }.value
         isSaving = false
 
@@ -196,6 +237,7 @@ final class NoteDocument {
         case .success(let report):
             backedUpThisSession = true
             retryDelay = .seconds(5)
+            pendingAppends.removeFirst(min(appends.count, pendingAppends.count))
             for (page, saved) in revisions where revision[page] == saved {
                 dirty.remove(page)
                 journalTimers[page]?.cancel()
@@ -205,7 +247,7 @@ final class NoteDocument {
             }
             let size = ByteCountFormatter.string(fromByteCount: Int64(report.bytes), countStyle: .file)
             Log.info("PDF 저장: \(report.pages)쪽 반영, \(size), \(String(format: "%.2f", report.seconds))초")
-            if dirty.isEmpty {
+            if !hasUnsavedChanges {
                 dirtySince = nil
                 saveState = .saved(Date())
             } else {

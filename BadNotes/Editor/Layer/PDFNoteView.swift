@@ -2,7 +2,8 @@
 //  PDFNoteView.swift
 //  BadNotes
 //
-//  PDF 보기 + 페이지마다 PencilKit 캔버스를 덮어서 필기.
+//  레이어 모드 (옵션). PDFView 위에 페이지마다 PencilKit 캔버스를 덮어서 필기.
+//  Apple 기본 도구(PKToolPicker)를 그대로 쓰는 대신, 확대하면 캔버스가 늘어나서 필기가 흐려짐.
 //  저장은 NoteDocument가 맡음. 여기서는 획이 바뀔 때마다 넘겨주기만 함.
 //
 
@@ -12,12 +13,11 @@ import PencilKit
 
 struct PDFNoteView: UIViewRepresentable {
     let document: NoteDocument
-    @Binding var jumpTarget: Int?
-    var onPage: (Int, Int) -> Void
-    var onScrollHide: (Bool) -> Void
+    let bridge: EditorBridge
+    var initialPage = 0
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(document: document, onPage: onPage, onScrollHide: onScrollHide)
+        Coordinator(document: document, bridge: bridge)
     }
 
     func makeUIView(context: Context) -> PDFView {
@@ -26,22 +26,38 @@ struct PDFNoteView: UIViewRepresentable {
         view.autoScales = true
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
+        view.backgroundColor = .clear
         view.pageOverlayViewProvider = c
         view.document = document.pdf
         view.isInMarkupMode = true
         c.pdfView = view
+        bridge.attach(c)
+        bridge.undoAction = nil
+        bridge.redoAction = nil
+        bridge.jumpAction = { [weak view] index in
+            guard let view, let page = view.document?.page(at: index) else { return }
+            view.go(to: page)
+        }
+        bridge.pageAddedAction = { [weak view, weak bridge] index in
+            guard let view else { return }
+            view.layoutDocumentView()
+            bridge?.pageCount = view.document?.pageCount ?? 0
+            if let page = view.document?.page(at: index) { view.go(to: page) }
+        }
         c.attach()
+        if initialPage > 0 {
+            let start = initialPage
+            DispatchQueue.main.async { [weak view] in
+                if let view, let page = view.document?.page(at: start) { view.go(to: page) }
+            }
+        }
         return view
     }
 
-    func updateUIView(_ uiView: PDFView, context: Context) {
-        if let t = jumpTarget, let page = uiView.document?.page(at: t) {
-            uiView.go(to: page)
-            DispatchQueue.main.async { jumpTarget = nil }
-        }
-    }
+    func updateUIView(_ uiView: PDFView, context: Context) {}
 
     static func dismantleUIView(_ uiView: PDFView, coordinator: Coordinator) {
+        coordinator.bridge.detach(coordinator)
         let document = coordinator.document
         Task { await document.flush(reason: "편집기 닫힘") }
     }
@@ -53,21 +69,18 @@ struct PDFNoteView: UIViewRepresentable {
 
     final class Coordinator: NSObject, PDFPageOverlayViewProvider, PKCanvasViewDelegate {
         let document: NoteDocument
-        let onPage: (Int, Int) -> Void
-        let onScrollHide: (Bool) -> Void
+        let bridge: EditorBridge
         let toolPicker = PKToolPicker()
         weak var pdfView: PDFView?
         var canvases: [Int: PageCanvasView] = [:]
         private var offsetObs: NSKeyValueObservation?
         private var lastY: CGFloat = 0
         private var lastToggle: CFTimeInterval = 0
-        private var barHidden = false
         private var verifiedRotations: Set<Int> = []
 
-        init(document: NoteDocument, onPage: @escaping (Int, Int) -> Void, onScrollHide: @escaping (Bool) -> Void) {
+        init(document: NoteDocument, bridge: EditorBridge) {
             self.document = document
-            self.onPage = onPage
-            self.onScrollHide = onScrollHide
+            self.bridge = bridge
             super.init()
             // PDF 종이는 다크 모드에서도 흰색이라 색 고르기도 라이트 기준
             toolPicker.colorUserInterfaceStyle = .light
@@ -88,32 +101,32 @@ struct PDFNoteView: UIViewRepresentable {
             // PDFView 안쪽 스크롤뷰를 찾아 스크롤 방향 감시
             DispatchQueue.main.async { [weak self] in
                 guard let self, let sv = self.findScrollView(in: view) else {
-                    AppLog.shared.warn("스크롤뷰를 못 찾아 상단바 자동 숨김이 꺼짐")
+                    AppLog.shared.warn("스크롤뷰를 못 찾아 도구 막대 자동 숨김이 꺼짐")
                     return
                 }
                 self.lastY = sv.contentOffset.y
                 self.offsetObs = sv.observe(\.contentOffset, options: [.new]) { [weak self] sv, _ in
-                    guard let self else { return }
-                    let y = sv.contentOffset.y
-                    let minY = -sv.adjustedContentInset.top
-                    let maxY = max(minY, sv.contentSize.height - sv.bounds.height + sv.adjustedContentInset.bottom)
-                    // 손가락으로 끌고 있을 때만 판정 (바 전환으로 인한 재배치·관성·튕김은 무시)
-                    guard sv.isTracking else { self.lastY = y; return }
-                    // 위/아래 끝을 넘어간 고무줄 구간은 무시
-                    if y < minY || y > maxY { self.lastY = y; return }
-                    let dy = y - self.lastY
-                    if abs(dy) < 12 { return }
-                    self.lastY = y
-                    // 방금 바꿨으면 잠깐 다시 안 바꿈
-                    let now = CACurrentMediaTime()
-                    if now - self.lastToggle < 0.35 { return }
-                    let hide = (y <= minY + 4) ? false : dy > 0
-                    if hide != self.barHidden {
-                        self.barHidden = hide
-                        self.lastToggle = now
-                        self.onScrollHide(hide)
-                    }
+                    MainActor.assumeIsolated { self?.scrolled(sv) }
                 }
+            }
+        }
+
+        private func scrolled(_ sv: UIScrollView) {
+            let y = sv.contentOffset.y
+            let minY = -sv.adjustedContentInset.top
+            let maxY = max(minY, sv.contentSize.height - sv.bounds.height + sv.adjustedContentInset.bottom)
+            // 손가락으로 끌고 있을 때만 판정 (재배치·관성·튕김은 무시)
+            guard sv.isTracking else { lastY = y; return }
+            if y < minY || y > maxY { lastY = y; return }
+            let dy = y - lastY
+            if abs(dy) < 12 { return }
+            lastY = y
+            let now = CACurrentMediaTime()
+            if now - lastToggle < 0.35 { return }
+            let hide = (y <= minY + 4) ? false : dy > 0
+            if hide != bridge.chromeHidden {
+                bridge.chromeHidden = hide
+                lastToggle = now
             }
         }
 
@@ -126,7 +139,8 @@ struct PDFNoteView: UIViewRepresentable {
         @objc func pageChanged() {
             guard let view = pdfView, let doc = view.document,
                   let cur = view.currentPage else { return }
-            onPage(doc.index(for: cur), doc.pageCount)
+            bridge.page = doc.index(for: cur)
+            bridge.pageCount = doc.pageCount
             reassertToolPicker()
         }
 
@@ -160,7 +174,7 @@ struct PDFNoteView: UIViewRepresentable {
             canvas.pageIndex = index
             canvas.backgroundColor = .clear
             canvas.isOpaque = false
-            canvas.drawingPolicy = .pencilOnly
+            canvas.drawingPolicy = AppSettings.shared.fingerDrawing ? .anyInput : .pencilOnly
             // PDF 종이는 다크 모드에서도 흰색 → 잉크 색을 뒤집으면 검은 글씨가 안 보임
             canvas.overrideUserInterfaceStyle = .light
             canvas.drawing = document.drawing(for: index)
@@ -192,8 +206,7 @@ struct PDFNoteView: UIViewRepresentable {
             document.update(canvas.drawing, page: canvas.pageIndex)
         }
 
-        /// 캔버스 좌표 → PDF 좌표 계산이 PDFKit의 실제 배치와 맞는지 회전 종류마다 한 번 확인.
-        /// 어긋나면 다른 앱에서 필기 위치가 틀어지므로 로그에 에러로 남김.
+        /// 캔버스 좌표 → PDF 좌표 계산이 PDFKit의 실제 배치와 맞는지 회전 종류마다 한 번 확인
         private func verifyGeometry(_ canvas: PageCanvasView, page: PDFPage) {
             guard let view = pdfView, canvas.window != nil, canvas.bounds.width > 10 else { return }
             let geometry = PageGeometry(page: page)
@@ -209,7 +222,7 @@ struct PDFNoteView: UIViewRepresentable {
                 let expected = point.applying(geometry.canvasToPage)
                 let actual = view.convert(canvas.convert(point, to: view), to: page)
                 if hypot(expected.x - actual.x, expected.y - actual.y) > 2 {
-                    Log.error("좌표 변환 불일치 (회전 \(geometry.rotation)°): 계산 \(expected), 실제 \(actual) — 다른 앱에서 필기 위치가 어긋날 수 있음")
+                    Log.error("좌표 변환 불일치 (회전 \(geometry.rotation)°): 계산 \(expected), 실제 \(actual)")
                     return
                 }
             }
