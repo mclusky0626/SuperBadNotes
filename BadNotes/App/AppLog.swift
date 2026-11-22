@@ -3,16 +3,31 @@
 //  BadNotes
 //
 //  앱 전체 로그. 에러가 생기면 화면 아래 빨간 배너로 바로 띄움.
+//  어느 스레드에서든 Log.info / warn / error 로 남기면 메인 스레드에서 로그 창에 붙음.
 //
 
 import SwiftUI
 import Observation
 
+/// 스레드 상관없이 쓰는 로그 입구
+nonisolated enum Log {
+    static func info(_ msg: String)  { post(.info, msg) }
+    static func warn(_ msg: String)  { post(.warn, msg) }
+    static func error(_ msg: String) { post(.error, msg) }
+
+    private static func post(_ level: AppLog.Level, _ msg: String) {
+        print("[\(level.rawValue)] \(msg)")
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { AppLog.shared.append(level, msg) }
+        }
+    }
+}
+
 @Observable
 final class AppLog {
     static let shared = AppLog()
 
-    enum Level: String { case info = "INFO", warn = "WARN", error = "ERROR" }
+    nonisolated enum Level: String, Sendable { case info = "INFO", warn = "WARN", error = "ERROR" }
 
     struct Entry: Identifiable {
         let id = UUID()
@@ -26,20 +41,17 @@ final class AppLog {
     var latestError: Entry?
     var unreadErrors = 0
 
-    func info(_ msg: String)  { add(.info, msg) }
-    func warn(_ msg: String)  { add(.warn, msg) }
-    func error(_ msg: String) { add(.error, msg) }
+    func info(_ msg: String)  { Log.info(msg) }
+    func warn(_ msg: String)  { Log.warn(msg) }
+    func error(_ msg: String) { Log.error(msg) }
 
-    private func add(_ level: Level, _ msg: String) {
+    fileprivate func append(_ level: Level, _ msg: String) {
         let e = Entry(level: level, message: msg)
-        print("[\(level.rawValue)] \(msg)")
-        DispatchQueue.main.async {
-            self.entries.append(e)
-            if self.entries.count > 500 { self.entries.removeFirst(self.entries.count - 500) }
-            if level == .error {
-                self.latestError = e
-                self.unreadErrors += 1
-            }
+        entries.append(e)
+        if entries.count > 500 { entries.removeFirst(entries.count - 500) }
+        if level == .error {
+            latestError = e
+            unreadErrors += 1
         }
     }
 
