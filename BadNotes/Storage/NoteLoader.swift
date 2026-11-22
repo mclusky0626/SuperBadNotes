@@ -14,11 +14,16 @@ import PencilKit
 nonisolated final class LoadedNote: @unchecked Sendable {
     let pdf: PDFDocument
     let drawings: [Int: PKDrawing]
+    let elements: [Int: [PageElement]]
+    let images: [String: Data]
     let problems: [String]
 
-    init(pdf: PDFDocument, drawings: [Int: PKDrawing], problems: [String]) {
+    init(pdf: PDFDocument, drawings: [Int: PKDrawing], elements: [Int: [PageElement]] = [:],
+         images: [String: Data] = [:], problems: [String]) {
         self.pdf = pdf
         self.drawings = drawings
+        self.elements = elements
+        self.images = images
         self.problems = problems
     }
 }
@@ -42,6 +47,8 @@ nonisolated enum NoteLoader {
         if pdf.isLocked { throw LoadError.locked }
 
         var drawings: [Int: PKDrawing] = [:]
+        var elements: [Int: [PageElement]] = [:]
+        var images: [String: Data] = [:]
         var problems: [String] = []
         for index in 0..<pdf.pageCount {
             guard let page = pdf.page(at: index) else { continue }
@@ -52,9 +59,18 @@ nonisolated enum NoteLoader {
             if !read.drawing.strokes.isEmpty {
                 drawings[index] = read.drawing
             }
-            problems += read.problems.map { "\(index + 1)쪽: \($0)" }
+            // 텍스트 상자·메모지·사진도 화면에서는 직접 그리므로 떼어 냄
+            let placed = ElementPayload.read(from: page)
+            for annotation in placed.annotations {
+                page.removeAnnotation(annotation)
+            }
+            if !placed.elements.isEmpty {
+                elements[index] = placed.elements
+            }
+            images.merge(placed.images) { a, _ in a }
+            problems += (read.problems + placed.problems).map { "\(index + 1)쪽: \($0)" }
         }
-        return LoadedNote(pdf: pdf, drawings: drawings, problems: problems)
+        return LoadedNote(pdf: pdf, drawings: drawings, elements: elements, images: images, problems: problems)
     }
 
     /// 파일 앱 등 다른 프로세스와 겹치지 않게 조율해서 읽음.

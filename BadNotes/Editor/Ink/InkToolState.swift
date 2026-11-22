@@ -14,7 +14,7 @@ final class InkToolState {
     static let shared = InkToolState()
 
     enum Tool: String, Codable, CaseIterable, Identifiable {
-        case pen, highlighter, eraser, lasso
+        case pen, highlighter, eraser, lasso, text
         var id: String { rawValue }
 
         var title: String {
@@ -23,6 +23,7 @@ final class InkToolState {
             case .highlighter: "형광펜"
             case .eraser: "지우개"
             case .lasso: "올가미"
+            case .text: "텍스트"
             }
         }
 
@@ -32,8 +33,12 @@ final class InkToolState {
             case .highlighter: "highlighter"
             case .eraser: "eraser"
             case .lasso: "lasso"
+            case .text: "character.textbox"
             }
         }
+
+        /// 펜슬로 긋는 도구 (펜슬이 페이지에 닿으면 이 도구가 받음)
+        var draws: Bool { self == .pen || self == .highlighter || self == .eraser || self == .lasso }
     }
 
     enum PenStyle: String, Codable, CaseIterable, Identifiable {
@@ -88,6 +93,13 @@ final class InkToolState {
             }
         }
 
+        var shortTitle: String {
+            switch self {
+            case .partial: "부분"
+            case .stroke: "획"
+            }
+        }
+
         var icon: String {
             switch self {
             case .partial: "eraser"
@@ -96,10 +108,24 @@ final class InkToolState {
         }
     }
 
-    static let penWidths: [CGFloat] = [1.2, 2.2, 3.8]
-    static let highlighterWidths: [CGFloat] = [10, 16, 24]
+    /// 굵기 칸 3개의 처음 값. 칸마다 슬라이더로 바꿀 수 있음 (페이지 pt)
+    static let defaultPenWidths: [CGFloat] = [1.2, 2.2, 3.8]
+    static let defaultHighlighterWidths: [CGFloat] = [10, 16, 24]
     /// 지우개 지름 (페이지 pt)
-    static let eraserSizes: [CGFloat] = [10, 22, 48]
+    static let defaultEraserSizes: [CGFloat] = [10, 22, 48]
+    static let penWidthRange: ClosedRange<CGFloat> = 0.4...16
+    static let highlighterWidthRange: ClosedRange<CGFloat> = 4...48
+    static let eraserSizeRange: ClosedRange<CGFloat> = 4...120
+
+    var penWidths = InkToolState.defaultPenWidths { didSet { save() } }
+    var highlighterWidths = InkToolState.defaultHighlighterWidths { didSet { save() } }
+    var eraserSizes = InkToolState.defaultEraserSizes { didSet { save() } }
+    /// 지우개가 형광펜 획만 지움 (글씨는 그대로 두고 밑줄만 지울 때)
+    var eraserHighlighterOnly = false { didSet { save() } }
+
+    /// 텍스트 도구로 새로 만드는 상자의 바탕과 글자 크기
+    var textFill: PageElement.Fill = .none { didSet { save() } }
+    var textSize: CGFloat = 20 { didSet { save() } }
 
     var tool: Tool = .pen {
         didSet {
@@ -146,11 +172,11 @@ final class InkToolState {
 
     var currentWidth: CGFloat {
         inkTool == .highlighter
-            ? Self.highlighterWidths[min(highlighterWidthIndex, Self.highlighterWidths.count - 1)]
-            : Self.penWidths[min(penWidthIndex, Self.penWidths.count - 1)]
+            ? highlighterWidths[min(highlighterWidthIndex, highlighterWidths.count - 1)]
+            : penWidths[min(penWidthIndex, penWidths.count - 1)]
     }
 
-    var eraserRadius: CGFloat { Self.eraserSizes[min(eraserSizeIndex, Self.eraserSizes.count - 1)] / 2 }
+    var eraserRadius: CGFloat { eraserSizes[min(eraserSizeIndex, eraserSizes.count - 1)] / 2 }
 
     // MARK: 도구 막대에 보이는 색·굵기
 
@@ -174,8 +200,34 @@ final class InkToolState {
     }
 
     var sizeOptions: [CGFloat] {
-        if tool == .eraser { return Self.eraserSizes }
-        return inkTool == .highlighter ? Self.highlighterWidths : Self.penWidths
+        if tool == .eraser { return eraserSizes }
+        return inkTool == .highlighter ? highlighterWidths : penWidths
+    }
+
+    /// 지금 도구의 굵기 범위 (슬라이더)
+    var sizeRange: ClosedRange<CGFloat> {
+        if tool == .eraser { return Self.eraserSizeRange }
+        return inkTool == .highlighter ? Self.highlighterWidthRange : Self.penWidthRange
+    }
+
+    /// 지금 고른 굵기 칸의 값을 바꿈
+    func setSize(_ value: CGFloat, at index: Int) {
+        let range = sizeRange
+        let clamped = min(max(value, range.lowerBound), range.upperBound)
+        if tool == .eraser {
+            if eraserSizes.indices.contains(index) { eraserSizes[index] = clamped }
+        } else if inkTool == .highlighter {
+            if highlighterWidths.indices.contains(index) { highlighterWidths[index] = clamped }
+        } else if penWidths.indices.contains(index) {
+            penWidths[index] = clamped
+        }
+    }
+
+    /// 굵기 칸들을 처음 값으로
+    func resetSizes() {
+        if tool == .eraser { eraserSizes = Self.defaultEraserSizes }
+        else if inkTool == .highlighter { highlighterWidths = Self.defaultHighlighterWidths }
+        else { penWidths = Self.defaultPenWidths }
     }
 
     var sizeIndex: Int {
@@ -219,6 +271,13 @@ final class InkToolState {
         var highlighterColorIndex: Int
         var highlighterWidthIndex: Int
         var eraserSizeIndex: Int
+        // 나중에 더한 값 (예전 저장본에는 없음)
+        var penWidths: [CGFloat]?
+        var highlighterWidths: [CGFloat]?
+        var eraserSizes: [CGFloat]?
+        var eraserHighlighterOnly: Bool?
+        var textFill: PageElement.Fill?
+        var textSize: CGFloat?
     }
 
     private static let key = "inkTools"
@@ -234,11 +293,17 @@ final class InkToolState {
         eraserMode = s.eraserMode
         if s.penColors.count == 3 { penColors = s.penColors }
         penColorIndex = min(max(0, s.penColorIndex), 2)
-        penWidthIndex = min(max(0, s.penWidthIndex), Self.penWidths.count - 1)
+        if let w = s.penWidths, w.count == 3 { penWidths = w }
+        if let w = s.highlighterWidths, w.count == 3 { highlighterWidths = w }
+        if let w = s.eraserSizes, w.count == 3 { eraserSizes = w }
+        eraserHighlighterOnly = s.eraserHighlighterOnly ?? false
+        textFill = s.textFill ?? .none
+        textSize = s.textSize ?? 20
+        penWidthIndex = min(max(0, s.penWidthIndex), penWidths.count - 1)
         if s.highlighterColors.count == 3 { highlighterColors = s.highlighterColors }
         highlighterColorIndex = min(max(0, s.highlighterColorIndex), 2)
-        highlighterWidthIndex = min(max(0, s.highlighterWidthIndex), Self.highlighterWidths.count - 1)
-        eraserSizeIndex = min(max(0, s.eraserSizeIndex), Self.eraserSizes.count - 1)
+        highlighterWidthIndex = min(max(0, s.highlighterWidthIndex), highlighterWidths.count - 1)
+        eraserSizeIndex = min(max(0, s.eraserSizeIndex), eraserSizes.count - 1)
         previousTool = inkTool
         loading = false
     }
@@ -248,7 +313,9 @@ final class InkToolState {
         let s = Stored(tool: tool, inkTool: inkTool, penStyle: penStyle, eraserMode: eraserMode,
                        penColors: penColors, penColorIndex: penColorIndex, penWidthIndex: penWidthIndex,
                        highlighterColors: highlighterColors, highlighterColorIndex: highlighterColorIndex,
-                       highlighterWidthIndex: highlighterWidthIndex, eraserSizeIndex: eraserSizeIndex)
+                       highlighterWidthIndex: highlighterWidthIndex, eraserSizeIndex: eraserSizeIndex,
+                       penWidths: penWidths, highlighterWidths: highlighterWidths, eraserSizes: eraserSizes,
+                       eraserHighlighterOnly: eraserHighlighterOnly, textFill: textFill, textSize: textSize)
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.key)
         }

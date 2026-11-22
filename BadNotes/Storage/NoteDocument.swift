@@ -42,6 +42,11 @@ final class NoteDocument {
     private static let maxUnsavedSeconds: TimeInterval = 20
 
     @ObservationIgnored private var drawings: [Int: PKDrawing]
+    /// 텍스트 상자·메모지·사진 (페이지별)
+    @ObservationIgnored private var elementsByPage: [Int: [PageElement]]
+    /// 요소가 쓰는 사진 원본 (번호 → 데이터)
+    @ObservationIgnored private var imageStore: [String: Data]
+    @ObservationIgnored private var decodedImages: [String: CGImage] = [:]
     @ObservationIgnored private var revision: [Int: Int] = [:]
     @ObservationIgnored private var dirty: Set<Int> = []
     @ObservationIgnored private var dirtySince: Date?
@@ -66,7 +71,7 @@ final class NoteDocument {
             let loaded = try NoteLoader.load(url)
             let recovered = journal.load()
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            return OpenResult(loaded: loaded, recovered: recovered.pages,
+            return OpenResult(loaded: loaded, recovered: recovered,
                               recoveryProblems: recovered.problems, fileSize: size)
         }.value
         return NoteDocument(url: url, opened: opened, journal: journal)
@@ -76,6 +81,8 @@ final class NoteDocument {
         self.url = url
         self.pdf = opened.loaded.pdf
         self.drawings = opened.loaded.drawings
+        self.elementsByPage = opened.loaded.elements
+        self.imageStore = opened.loaded.images.merging(opened.recovered.images) { a, _ in a }
         self.journal = journal
         self.paperSpec = PaperSpec.from(documentAttributes: opened.loaded.pdf.documentAttributes)
         self.hasCover = PaperSpec.hasCover(opened.loaded.pdf.documentAttributes)
@@ -89,9 +96,10 @@ final class NoteDocument {
             Log.error("필기 읽기 문제 — \(problem)")
         }
 
-        let recovered = opened.recovered.filter { $0.key >= 0 && $0.key < pageCount }
-        for (page, drawing) in recovered {
-            drawings[page] = drawing
+        let recovered = opened.recovered.allPages.filter { $0 >= 0 && $0 < pageCount }
+        for page in recovered {
+            if let drawing = opened.recovered.drawings[page] { drawings[page] = drawing }
+            if let elements = opened.recovered.elements[page] { elementsByPage[page] = elements.isEmpty ? nil : elements }
             revision[page] = 1
             dirty.insert(page)
         }
@@ -118,6 +126,33 @@ final class NoteDocument {
 
     func update(_ drawing: PKDrawing, page: Int) {
         drawings[page] = drawing
+        markChanged(page)
+    }
+
+    // MARK: 텍스트 상자·메모지·사진
+
+    func elements(for page: Int) -> [PageElement] {
+        elementsByPage[page] ?? []
+    }
+
+    func updateElements(_ elements: [PageElement], page: Int) {
+        elementsByPage[page] = elements.isEmpty ? nil : elements
+        markChanged(page)
+    }
+
+    /// 사진 원본을 문서에 넣어 둠 (같은 사진이면 한 번만)
+    func addImage(id: String, data: Data) {
+        if imageStore[id] == nil { imageStore[id] = data }
+    }
+
+    func image(for id: String) -> CGImage? {
+        if let hit = decodedImages[id] { return hit }
+        guard let data = imageStore[id], let image = ElementImages.decode(data) else { return nil }
+        decodedImages[id] = image
+        return image
+    }
+
+    private func markChanged(_ page: Int) {
         revision[page, default: 0] += 1
         dirty.insert(page)
         if dirtySince == nil { dirtySince = Date() }
@@ -187,10 +222,14 @@ final class NoteDocument {
         journalTimers[page] = nil
         guard dirty.contains(page) else { return }
         let drawing = drawing(for: page)
+        let elements = elements(for: page)
+        let used = Set(elements.compactMap(\.imageID))
+        let images = imageStore.filter { used.contains($0.key) }
         let journal = journal
         journalQueue.async {
             do {
                 try journal.write(drawing, page: page)
+                try journal.write(elements, images: images, page: page)
             } catch {
                 Log.error("복구 기록 실패 (\(page + 1)쪽): \(error.localizedDescription)")
             }
@@ -215,7 +254,11 @@ final class NoteDocument {
         guard hasUnsavedChanges, !isSaving else { return }
         isSaving = true
         saveState = .saving
-        let pages = Dictionary(uniqueKeysWithValues: dirty.map { ($0, drawing(for: $0)) })
+        let pages = Dictionary(uniqueKeysWithValues: dirty.map {
+            ($0, PageContent(drawing: drawing(for: $0), elements: elements(for: $0)))
+        })
+        let used = Set(pages.values.flatMap { $0.elements ?? [] }.compactMap(\.imageID))
+        let images = imageStore.filter { used.contains($0.key) }
         let revisions = Dictionary(uniqueKeysWithValues: dirty.map { ($0, revision[$0] ?? 0) })
         let appends = pendingAppends
         let url = url
@@ -229,7 +272,7 @@ final class NoteDocument {
                     Log.warn("백업 실패 (저장은 계속함): \(error.localizedDescription)")
                 }
             }
-            return Result { try PDFInkWriter.apply(pages, appending: appends, to: url) }
+            return Result { try PDFInkWriter.apply(content: pages, images: images, appending: appends, to: url) }
         }.value
         isSaving = false
 
@@ -300,7 +343,7 @@ private final class BackgroundTask {
 /// 백그라운드에서 연 결과를 메인으로 넘기는 상자
 nonisolated private struct OpenResult: @unchecked Sendable {
     let loaded: LoadedNote
-    let recovered: [Int: PKDrawing]
+    let recovered: DrawingJournal.Recovered
     let recoveryProblems: [String]
     let fileSize: Int
 }

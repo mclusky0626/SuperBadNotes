@@ -15,7 +15,7 @@ import PDFKit
 import PencilKit
 
 final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerDelegate,
-                              UIPencilInteractionDelegate, UIEditMenuInteractionDelegate {
+                              UIPencilInteractionDelegate, UIEditMenuInteractionDelegate, ElementHost {
     let document: NoteDocument
     private let tools: InkToolState
     private let bridge: EditorBridge
@@ -29,6 +29,12 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     private let undoTap = UITapGestureRecognizer()
     private let redoTap = UITapGestureRecognizer()
     private var editMenu: UIEditMenuInteraction?
+    /// 텍스트 상자·메모지·사진
+    private let elements = ElementController()
+    private let elementTap = UITapGestureRecognizer()
+    private let elementPan = UIPanGestureRecognizer()
+    /// 키보드가 가린 높이 (그만큼 아래 여백을 더 줌)
+    private var keyboardOverlap: CGFloat = 0
 
     private var laidOutWidth: CGFloat = 0
     private var didInitialScroll = false
@@ -76,12 +82,15 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         scrollView.addSubview(contentView)
 
         let pdf = document.pdf
+        elements.host = self
+        elements.tools = tools
         for index in 0..<pdf.pageCount {
             let page = pdf.page(at: index) ?? PDFPage()
             let view = PageView(index: index, page: page, size: PageGeometry(page: page).canvasSize,
                                 ink: PageInk(drawing: document.drawing(for: index)), documentLock: document.renderLock)
             pageViews.append(view)
             contentView.addSubview(view)
+            elements.refresh(view)
         }
 
         addSubview(wetView)
@@ -101,6 +110,24 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         scrollView.addGestureRecognizer(undoTap)
         scrollView.addGestureRecognizer(redoTap)
 
+        // 요소: 손가락(텍스트 도구면 펜슬도) 탭으로 고르기·만들기, 고른 요소는 끌어서 옮기기·크기 바꾸기
+        let anyTouch = [NSNumber(value: UITouch.TouchType.direct.rawValue), NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        elementTap.allowedTouchTypes = anyTouch
+        elementTap.delegate = self
+        elementTap.addTarget(self, action: #selector(handleElementTap(_:)))
+        scrollView.addGestureRecognizer(elementTap)
+        elementPan.allowedTouchTypes = anyTouch
+        elementPan.maximumNumberOfTouches = 1
+        elementPan.delegate = self
+        elementPan.addTarget(self, action: #selector(handleElementPan(_:)))
+        scrollView.addGestureRecognizer(elementPan)
+        scrollView.panGestureRecognizer.require(toFail: elementPan)
+
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)),
+                                               name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)),
+                                               name: UIResponder.keyboardWillHideNotification, object: nil)
+
         addInteraction(UIPencilInteraction(delegate: self))
         let menu = UIEditMenuInteraction(delegate: self)
         addInteraction(menu)
@@ -114,6 +141,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         bridge.redoAction = { [weak self] in self?.performRedo() }
         bridge.jumpAction = { [weak self] page in self?.scroll(toPage: page, animated: true) }
         bridge.pageAddedAction = { [weak self] page in self?.pageAdded(page) }
+        bridge.insertAction = { [weak self] what in self?.insert(what) }
         setFingerDrawing(false)
     }
 
@@ -124,9 +152,14 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     // MARK: 바깥(SwiftUI)에서 부르는 것
 
     func toolChanged(_ tool: InkToolState.Tool) {
+        guard tool != currentTool else { return }
+        currentTool = tool
         if tool != .lasso { clearSelection() }
         if tool != .eraser { wetView.setEraser(center: nil, radius: 0, page: nil) }
+        elements.endEditing()
     }
+
+    private var currentTool: InkToolState.Tool?
 
     func setFingerDrawing(_ on: Bool) {
         var types = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
@@ -141,8 +174,10 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     }
 
     func prepareForRemoval() {
+        elements.endEditing()
         wetView.stop()
         bridge.detach(self)
+        NotificationCenter.default.removeObserver(self)
     }
 
     // MARK: 배치
@@ -194,7 +229,8 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     /// 내용이 화면보다 좁으면 가운데로
     private func updateInsets() {
         let side = max(0, (scrollView.bounds.width - scrollView.contentSize.width) / 2)
-        scrollView.contentInset = UIEdgeInsets(top: chromeInsets.top, left: side, bottom: chromeInsets.bottom, right: side)
+        let bottom = max(chromeInsets.bottom, keyboardOverlap + 16)
+        scrollView.contentInset = UIEdgeInsets(top: chromeInsets.top, left: side, bottom: bottom, right: side)
         scrollView.verticalScrollIndicatorInsets = UIEdgeInsets(top: chromeInsets.top, left: 0,
                                                                 bottom: chromeInsets.bottom, right: 0)
     }
@@ -226,17 +262,28 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
         updateInsets()
         wetView.refresh()
+        elements.updateSelectionFrame()
+    }
+
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        elements.zoomEnded()
+        if elements.selected != nil { elements.presentMenu() }
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateCurrentPage()
         if wetView.hasContent { wetView.refresh() }
-        if selection != nil { editMenu?.dismissMenu() }
+        if selection != nil || elements.selected != nil { editMenu?.dismissMenu() }
         updateChromeVisibility()
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
         if selection != nil { showSelection() }
+        if elements.selected != nil { elements.presentMenu() }
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate, elements.selected != nil { elements.presentMenu() }
     }
 
     private func updateCurrentPage() {
@@ -260,6 +307,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
                             ink: PageInk(drawing: document.drawing(for: index)), documentLock: document.renderLock)
         pageViews.append(view)
         contentView.addSubview(view)
+        elements.refresh(view)
         bridge.pageCount = pageViews.count
         // 지금 확대·위치 그대로 두고 다시 배치
         let zoom = scrollView.zoomScale
@@ -317,11 +365,24 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     }
 
     private func inputBegan(_ touch: UITouch, _ event: UIEvent) -> Bool {
-        editMenu?.dismissMenu()
         guard let pageView = pageView(at: touch.location(in: contentView)) else { return false }
         let location = touch.location(in: pageView)
+        // 고치는 중인 글상자 안은 글상자가 받음 (펜슬 손글씨 입력 포함)
+        if elements.isEditing {
+            if elements.isInsideEditing(location, page: pageView.index) { return false }
+            elements.endEditing()
+        }
+        // 텍스트 도구는 탭으로, 고른 요소를 잡은 펜슬은 끌기로
+        if tools.tool == .text { return false }
+        // 고른 요소를 잡으면 옮기기 (손가락은 늘, 펜슬은 올가미일 때)
+        if touch.type != .pencil || tools.tool == .lasso, elements.grabs(location, page: pageView.index) { return false }
+        // 다른 데 쓰기 시작하면 고른 요소는 놓아 줌
+        if elements.selected != nil { elements.clearSelection() }
+        editMenu?.dismissMenu()
 
         switch tools.tool {
+        case .text:
+            return false
         case .pen, .highlighter:
             clearSelection()
             var newBuilder = StrokeBuilder(inkType: tools.currentInkType, color: tools.currentInkColor,
@@ -423,7 +484,16 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
         case .lassoing(let pageView):
             wetView.setLasso([], page: nil)
-            if !cancelled { finishLasso(on: pageView) }
+            if !cancelled {
+                // 올가미를 거의 안 그리고 톡 찍었으면: 그 자리 요소 고르기
+                let box = lassoPoints.reduce(CGRect.null) { $0.union(CGRect(origin: $1, size: .zero)) }
+                if box.width < 8, box.height < 8, let point = lassoPoints.first,
+                   let hit = elements.hit(point, page: pageView.index) {
+                    elements.select(hit.id, page: pageView.index)
+                } else {
+                    finishLasso(on: pageView)
+                }
+            }
             lassoPoints = []
 
         case .moving(let pageView, let before, let start, let indices):
@@ -460,10 +530,15 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         let sampled = pageView.ink.sampledStrokes()
         guard sampled.count == drawing.strokes.count else { return }
 
+        let onlyHighlighter = tools.eraserHighlighterOnly
         var changed = false
         var kept: [PKStroke] = []
         kept.reserveCapacity(drawing.strokes.count)
         for (stroke, s) in zip(drawing.strokes, sampled) {
+            if onlyHighlighter && !StrokeEditing.isHighlighter(stroke) {
+                kept.append(stroke)
+                continue
+            }
             switch mode {
             case .stroke:
                 if StrokeEditing.touches(s, from: a, to: b, radius: radius) {
@@ -490,6 +565,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     private func finishLasso(on pageView: PageView) {
         guard lassoPoints.count > 4 else { return }
+        elements.clearSelection()
         let path = CGMutablePath()
         path.addLines(between: lassoPoints)
         path.closeSubpath()
@@ -512,6 +588,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         guard !rect.isNull else { clearSelection(); return }
         wetView.setSelection(rect, page: pageView)
         let onScreen = pageView.convert(rect, to: self)
+        menuTarget = onScreen
         editMenu?.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil,
                                                                  sourcePoint: CGPoint(x: onScreen.midX, y: onScreen.minY)))
     }
@@ -525,6 +602,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
                              suggestedActions: [UIMenuElement]) -> UIMenu? {
+        if configuration.identifier as? String == "element" { return elements.menu() }
         guard selection != nil else { return nil }
         return UIMenu(children: [
             UIAction(title: "복제", image: UIImage(systemName: "plus.square.on.square")) { [weak self] _ in
@@ -606,12 +684,14 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     private func performUndo() {
         clearSelection()
+        elements.endEditing()
         if history.canUndo { history.undo() }
         refreshUndoState()
     }
 
     private func performRedo() {
         clearSelection()
+        elements.endEditing()
         if history.canRedo { history.redo() }
         refreshUndoState()
     }
@@ -640,6 +720,179 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         gestureRecognizer === inkGesture
             && (other === scrollView.pinchGestureRecognizer || other === scrollView.panGestureRecognizer)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === elementTap {
+            // 펜슬은 텍스트 도구일 때만 (나머지 도구에서는 필기)
+            if touch.type == .pencil { return tools.tool == .text }
+            // 손가락 필기를 켰으면 손가락도 필기 → 텍스트·올가미 도구에서만, 또는 고른 요소를 다시 누를 때
+            if AppSettings.shared.fingerDrawing {
+                return tools.tool == .text || tools.tool == .lasso || elementAt(touch)?.id == elements.selected?.id
+            }
+            return true
+        }
+        if gestureRecognizer === elementPan {
+            if touch.type == .pencil, tools.tool != .lasso, tools.tool != .text { return false }
+            guard let pageView = pageView(at: touch.location(in: contentView)) else { return false }
+            return elements.grabs(touch.location(in: pageView), page: pageView.index)
+        }
+        return true
+    }
+
+    private func elementAt(_ touch: UITouch) -> PageElement? {
+        guard let pageView = pageView(at: touch.location(in: contentView)) else { return nil }
+        return elements.hit(touch.location(in: pageView), page: pageView.index)
+    }
+
+    // MARK: 요소 (텍스트 상자·메모지·사진)
+
+    @objc private func handleElementTap(_ gesture: UITapGestureRecognizer) {
+        guard gesture.state == .ended else { return }
+        guard let pageView = pageView(at: gesture.location(in: contentView)) else {
+            elements.clearSelection()
+            return
+        }
+        let point = gesture.location(in: pageView)
+        if elements.isEditing {
+            if elements.isInsideEditing(point, page: pageView.index) { return }
+            elements.endEditing()
+        }
+        if let hit = elements.hit(point, page: pageView.index) {
+            clearSelection()
+            if elements.selected?.id == hit.id, hit.hasText {
+                elements.beginEditing()
+            } else {
+                elements.select(hit.id, page: pageView.index)
+            }
+            return
+        }
+        if tools.tool == .text {
+            clearSelection()
+            elements.clearSelection()
+            elements.insertText(at: point, page: pageView.index, pageSize: pageView.bounds.size, fill: tools.textFill)
+            return
+        }
+        if elements.selected != nil { elements.clearSelection() }
+    }
+
+    @objc private func handleElementPan(_ gesture: UIPanGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            // 끌기가 인식될 때는 이미 조금 움직인 뒤라서, 처음 닿은 자리(손잡이 판정)는 이동량을 빼서 구함
+            let moved = gesture.translation(in: contentView)
+            let now = gesture.location(in: contentView)
+            let start = CGPoint(x: now.x - moved.x, y: now.y - moved.y)
+            guard let pageView = pageView(at: start),
+                  elements.beginDrag(at: contentView.convert(start, to: pageView), page: pageView.index) else {
+                gesture.isEnabled = false
+                gesture.isEnabled = true
+                return
+            }
+        case .changed:
+            guard let page = elements.dragPage, pageViews.indices.contains(page) else { return }
+            elements.moveDrag(to: gesture.location(in: pageViews[page]))
+        case .ended:
+            elements.endDrag(cancelled: false)
+        case .cancelled, .failed:
+            elements.endDrag(cancelled: true)
+        default:
+            break
+        }
+    }
+
+    /// 도구 막대의 [+]에서: 지금 보고 있는 페이지 가운데에 넣음
+    private func insert(_ what: EditorBridge.Insert) {
+        clearSelection()
+        elements.clearSelection()
+        let index = min(max(bridge.page, 0), pageViews.count - 1)
+        guard pageViews.indices.contains(index) else { return }
+        let pageView = pageViews[index]
+        let visible = scrollView.bounds.inset(by: scrollView.adjustedContentInset)
+        let area = scrollView.convert(visible, to: pageView).intersection(pageView.bounds)
+        let center = area.isNull ? CGPoint(x: pageView.bounds.midX, y: pageView.bounds.midY) : CGPoint(x: area.midX, y: area.midY)
+        let size = pageView.bounds.size
+        switch what {
+        case .text(let fill):
+            let width = min(340, size.width * 0.6)
+            elements.insertText(at: CGPoint(x: center.x - width / 2, y: center.y), page: index, pageSize: size, fill: fill)
+        case .sticky:
+            elements.insertSticky(center: center, page: index, pageSize: size)
+        case .image(let data):
+            Task { [weak self] in
+                let prepared = await Task.detached(priority: .userInitiated) { ElementImages.prepare(data) }.value
+                guard let self else { return }
+                guard let prepared else {
+                    Log.error("사진을 읽지 못함")
+                    return
+                }
+                self.document.addImage(id: prepared.id, data: prepared.data)
+                self.elements.insertImage(id: prepared.id, size: prepared.size, center: center, page: index, pageSize: size)
+            }
+        }
+    }
+
+    @objc private func keyboardChanged(_ note: Notification) {
+        var overlap: CGFloat = 0
+        if note.name != UIResponder.keyboardWillHideNotification,
+           let frame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue, window != nil {
+            let local = convert(frame, from: nil)
+            overlap = max(0, bounds.maxY - local.minY)
+        }
+        guard abs(overlap - keyboardOverlap) > 0.5 else { return }
+        keyboardOverlap = overlap
+        updateInsets()
+        if let selected = elements.selected, elements.isEditing, let element = elements.selectedElement,
+           pageViews.indices.contains(selected.page) {
+            elementReveal(element.frame, in: pageViews[selected.page])
+        }
+    }
+
+    // MARK: ElementHost
+
+    var elementDocument: NoteDocument { document }
+    var elementUndo: UndoManager { history }
+    var elementZoom: CGFloat { scrollView.zoomScale }
+
+    func elementPageView(_ index: Int) -> PageView? {
+        pageViews.indices.contains(index) ? pageViews[index] : nil
+    }
+
+    func elementUndoChanged() {
+        refreshUndoState()
+    }
+
+    func elementShowMenu(_ rect: CGRect, in pageView: PageView) {
+        let onScreen = pageView.convert(rect, to: self)
+        menuTarget = onScreen
+        editMenu?.presentEditMenu(with: UIEditMenuConfiguration(identifier: "element" as NSString,
+                                                                 sourcePoint: CGPoint(x: onScreen.midX, y: onScreen.minY)))
+    }
+
+    /// 메뉴가 고른 것을 가리지 않게 그 둘레에 띄움
+    private var menuTarget: CGRect?
+
+    func editMenuInteraction(_ interaction: UIEditMenuInteraction, targetRectFor configuration: UIEditMenuConfiguration) -> CGRect {
+        menuTarget ?? CGRect(origin: configuration.sourcePoint, size: .zero)
+    }
+
+    func elementHideMenu() {
+        editMenu?.dismissMenu()
+    }
+
+    func elementReveal(_ rect: CGRect, in pageView: PageView) {
+        let target = pageView.convert(rect, to: scrollView)
+        let top = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+        let bottom = scrollView.contentOffset.y + scrollView.bounds.height - scrollView.adjustedContentInset.bottom
+        var y = scrollView.contentOffset.y
+        if target.maxY + 20 > bottom { y += target.maxY + 20 - bottom }
+        if target.minY - 20 < top + (y - scrollView.contentOffset.y) { y = target.minY - 20 - scrollView.adjustedContentInset.top }
+        let maxY = max(-scrollView.adjustedContentInset.top,
+                       scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
+        y = min(max(y, -scrollView.adjustedContentInset.top), maxY)
+        if abs(y - scrollView.contentOffset.y) > 1 {
+            scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: y), animated: true)
+        }
     }
 
     // MARK: 점검용 시연

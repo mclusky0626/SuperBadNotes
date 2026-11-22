@@ -27,11 +27,20 @@ final class EditorBridge {
     @ObservationIgnored var jumpAction: ((Int) -> Void)?
     /// 문서에 페이지가 들어온 뒤 편집기에 알림
     @ObservationIgnored var pageAddedAction: ((Int) -> Void)?
+    /// 텍스트 상자·메모지·사진 넣기
+    @ObservationIgnored var insertAction: ((Insert) -> Void)?
+
+    enum Insert {
+        case text(PageElement.Fill)
+        case sticky
+        case image(Data)
+    }
 
     func undo() { undoAction?() }
     func redo() { redoAction?() }
     func jump(to page: Int) { jumpAction?(page) }
     func pageAdded(_ page: Int) { pageAddedAction?(page) }
+    func insert(_ what: Insert) { insertAction?(what) }
 
     func attach(_ editor: AnyObject) {
         owner = ObjectIdentifier(editor)
@@ -47,6 +56,7 @@ final class EditorBridge {
         redoAction = nil
         jumpAction = nil
         pageAddedAction = nil
+        insertAction = nil
         canUndo = false
         canRedo = false
     }

@@ -13,26 +13,27 @@ final class AppSettings {
     static let shared = AppSettings()
 
     enum EditMode: String, CaseIterable, Identifiable {
-        /// 기본. 필기가 PDF 페이지와 같이 그려져서 확대해도 선명함 (굿노트, PDF 앱처럼)
+        /// 기본. BadNotes 필기 엔진 (필기가 PDF 페이지와 같이 그려져서 확대해도 선명함)
         case direct
-        /// 옵션. PDF 위에 Apple PencilKit 캔버스를 덮음 (Apple 기본 도구 그대로, 확대하면 흐려짐)
-        case layer
+        /// 옵션. Apple PencilKit 캔버스 + Apple 기본 도구. 페이지를 캔버스 아래에 깔고 같이 확대해서 선명함.
+        /// (예전 '레이어' 모드 자리라서 저장값은 그대로 "layer")
+        case pencilKit = "layer"
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .direct: "직접 필기"
-            case .layer: "레이어 (PencilKit)"
+            case .direct: "BadNotes 필기 도구 (기본)"
+            case .pencilKit: "Apple 필기 도구 (PencilKit)"
             }
         }
 
         var detail: String {
             switch self {
             case .direct:
-                "필기가 PDF 페이지와 함께 그려져서 아무리 확대해도 선명해요. 보이는 그대로 PDF에 저장되고 다른 앱에서도 똑같이 보여요."
-            case .layer:
-                "PDF 위에 Apple 필기 캔버스를 덮어요. Apple 기본 도구(자, 올가미 등)를 그대로 쓰지만 확대하면 필기가 흐려져요."
+                "BadNotes가 직접 그리는 펜·형광펜·지우개·올가미·텍스트. 아무리 확대해도 선명하고, 보이는 그대로 PDF에 저장돼요."
+            case .pencilKit:
+                "Apple이 만든 도구(펜·마커·연필·만년필·수채화·크레용·지우개·올가미·자)를 그대로 써요. 확대해도 선명하고, 저장은 똑같이 PDF 안에 돼요. 텍스트 상자·메모지·사진은 [+]에서 넣어요."
             }
         }
     }
@@ -72,6 +73,8 @@ final class AppSettings {
         #if DEBUG
         // 시뮬레이터 점검용: 마우스(손가락)로 그리기
         if ProcessInfo.processInfo.arguments.contains("-BNFingerDraw") { fingerDrawing = true }
+        // 시뮬레이터 점검용: Apple 필기 도구 모드로 열기 (저장은 안 함)
+        if ProcessInfo.processInfo.arguments.contains("-BNAppleTools") { editMode = .pencilKit }
         #endif
     }
 }

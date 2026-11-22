@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import PDFKit
 
 struct NewNotebookSheet: View {
     @Environment(ThemeStore.self) private var themes
@@ -201,25 +202,9 @@ struct NewNotebookSheet: View {
                 Toggle("표지 넣기", isOn: $hasCover)
                     .fixedSize()
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 18)], spacing: 24) {
-                ForEach(CoverStyle.allCases) { style in
-                    Button {
-                        cover = style
-                        hasCover = true
-                    } label: {
-                        VStack(spacing: 8) {
-                            Image(uiImage: PaperPreviews.cover(style, title: displayName, page: paper.pageSize, height: 160))
-                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                .shadow(color: .black.opacity(0.18), radius: 5, y: 3)
-                                .overlay(alignment: .bottomTrailing) {
-                                    if hasCover && cover == style { checkmark }
-                                }
-                            Text(style.title)
-                                .font(.subheadline)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
+            CoverGrid(selected: hasCover ? cover : nil, title: displayName, page: paper.pageSize) { style in
+                cover = style
+                hasCover = true
             }
         }
     }
@@ -242,6 +227,114 @@ struct NewNotebookSheet: View {
             onCreated(url)
         } catch {
             Log.error("노트북 만들기 실패: \(error.localizedDescription)")
+        }
+    }
+}
+
+/// 표지 고르기 격자 (클래식 / 패턴 / 그림)
+struct CoverGrid: View {
+    @Environment(ThemeStore.self) private var themes
+
+    let selected: CoverStyle?
+    let title: String
+    let page: CGSize
+    let onPick: (CoverStyle) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(CoverStyle.Group.allCases) { group in
+                Text(group.title)
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 6)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 18)], spacing: 24) {
+                    ForEach(CoverStyle.styles(in: group)) { style in
+                        tile(style)
+                    }
+                }
+            }
+        }
+    }
+
+    private func tile(_ style: CoverStyle) -> some View {
+        Button { onPick(style) } label: {
+            VStack(spacing: 8) {
+                Image(uiImage: PaperPreviews.cover(style, title: title, page: page, height: 160))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .shadow(color: .black.opacity(0.18), radius: 5, y: 3)
+                    .overlay(alignment: .bottomTrailing) {
+                        if selected == style {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.title2)
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(.white, themes.accent)
+                                .padding(8)
+                        }
+                    }
+                Text(style.title)
+                    .font(.subheadline)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// 이미 있는 노트북(또는 PDF)의 표지 바꾸기. 표지가 없던 PDF면 맨 앞에 표지를 넣음
+struct ChangeCoverSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let item: LibraryItem
+    let onPick: (CoverStyle) -> Void
+
+    @State private var current: CoverStyle?
+    @State private var page = PaperSpec.Size.a4Portrait.points
+    @State private var picked: CoverStyle?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(current == nil ? "표지가 없는 문서예요. 고른 표지를 맨 앞에 넣어요."
+                                        : "표지 위에 쓴 필기는 새 표지로 그대로 옮겨져요.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    CoverGrid(selected: picked ?? current, title: item.name, page: page) { picked = $0 }
+                }
+                .padding(24)
+            }
+            .navigationTitle("표지 바꾸기")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button { dismiss() } label: { Image(systemName: "xmark") }
+                        .accessibilityLabel("취소")
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        if let picked { onPick(picked) }
+                        dismiss()
+                    } label: { Image(systemName: "checkmark") }
+                        .buttonStyle(.glassProminent)
+                        .disabled(picked == nil)
+                        .accessibilityLabel("바꾸기")
+                }
+            }
+        }
+        .presentationSizing(.page)
+        .task {
+            // 지금 표지와 페이지 크기 (미리보기를 같은 비율로)
+            let url = item.url
+            let info = await Task.detached(priority: .userInitiated) { () -> (CoverStyle?, CGSize)? in
+                guard let document = PDFDocument(url: url), let first = document.page(at: 0) else { return nil }
+                let style = PaperSpec.keywords(document.documentAttributes)
+                    .first { $0.hasPrefix(PaperSpec.coverPrefix) }
+                    .flatMap { CoverStyle(rawValue: String($0.dropFirst(PaperSpec.coverPrefix.count))) }
+                return (style, PageGeometry(page: first).canvasSize)
+            }.value
+            if let info {
+                current = info.0
+                page = info.1
+            }
         }
     }
 }

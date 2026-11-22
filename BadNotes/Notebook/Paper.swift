@@ -120,7 +120,7 @@ nonisolated struct PaperSpec: Codable, Hashable, Sendable {
         keywords(documentAttributes).contains { $0.hasPrefix(coverPrefix) }
     }
 
-    private static func keywords(_ documentAttributes: [AnyHashable: Any]?) -> [String] {
+    static func keywords(_ documentAttributes: [AnyHashable: Any]?) -> [String] {
         guard let value = documentAttributes?["Keywords"] else { return [] }
         if let list = value as? [String] { return list.map { $0.trimmingCharacters(in: .whitespaces) } }
         if let text = value as? String {
@@ -130,45 +130,64 @@ nonisolated struct PaperSpec: Codable, Hashable, Sendable {
     }
 }
 
-/// 노트북 표지 (전부 코드로 그림)
+/// 노트북 표지 (전부 코드로 그림: `CoverArt`). rawValue는 PDF 키워드에 들어가니 바꾸지 말 것
 nonisolated enum CoverStyle: String, Codable, CaseIterable, Identifiable, Sendable {
-    case navy, burgundy, forest, sky, lemon, blush, charcoal, cream, stripes, waves, dots, linen
+    // 클래식
+    case navy, burgundy, forest, charcoal, cream, sky, lemon, blush
+    // 패턴
+    case stripes, dots, gingham, linen, terrazzo, memphis, kraft
+    // 그림
+    case waves, mountains, sunset, night, leaves, bauhaus
 
     var id: String { rawValue }
+
+    enum Group: String, CaseIterable, Identifiable, Sendable {
+        case classic, pattern, art
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .classic: "클래식"
+            case .pattern: "패턴"
+            case .art: "그림"
+            }
+        }
+    }
+
+    var group: Group {
+        switch self {
+        case .navy, .burgundy, .forest, .charcoal, .cream, .sky, .lemon, .blush: .classic
+        case .stripes, .dots, .gingham, .linen, .terrazzo, .memphis, .kraft: .pattern
+        case .waves, .mountains, .sunset, .night, .leaves, .bauhaus: .art
+        }
+    }
 
     var title: String {
         switch self {
         case .navy: "남색"
         case .burgundy: "버건디"
         case .forest: "숲"
+        case .charcoal: "먹색"
+        case .cream: "크림"
         case .sky: "하늘"
         case .lemon: "레몬"
         case .blush: "분홍"
-        case .charcoal: "먹색"
-        case .cream: "크림"
-        case .stripes: "줄무늬"
-        case .waves: "물결"
+        case .stripes: "사선"
         case .dots: "물방울"
+        case .gingham: "깅엄 체크"
         case .linen: "리넨"
+        case .terrazzo: "테라조"
+        case .memphis: "멤피스"
+        case .kraft: "크라프트"
+        case .waves: "바다"
+        case .mountains: "산"
+        case .sunset: "노을"
+        case .night: "밤하늘"
+        case .leaves: "잎사귀"
+        case .bauhaus: "바우하우스"
         }
     }
 
-    /// 바탕색, 무늬·글자색
-    var colors: (base: UIColor, detail: UIColor) {
-        func rgb(_ hex: UInt32) -> UIColor { RGBAColor(hex: hex).uiColor }
-        switch self {
-        case .navy: return (rgb(0x23314F), rgb(0xE9EDF5))
-        case .burgundy: return (rgb(0x6B1F2E), rgb(0xF3E4E6))
-        case .forest: return (rgb(0x2F4A3A), rgb(0xE6EFE9))
-        case .sky: return (rgb(0x8FB8DE), rgb(0x1F3550))
-        case .lemon: return (rgb(0xF2DC6B), rgb(0x4A3F12))
-        case .blush: return (rgb(0xEDB8C3), rgb(0x5A2733))
-        case .charcoal: return (rgb(0x2B2B2E), rgb(0xE7E7EA))
-        case .cream: return (rgb(0xF1E8D6), rgb(0x5B4A2E))
-        case .stripes: return (rgb(0x3A5BA0), rgb(0xFFFFFF))
-        case .waves: return (rgb(0x1F6F78), rgb(0xD9F2F0))
-        case .dots: return (rgb(0xE8735A), rgb(0xFFF1EB))
-        case .linen: return (rgb(0xC8B79A), rgb(0x4E4230))
-        }
+    static func styles(in group: Group) -> [CoverStyle] {
+        allCases.filter { $0.group == group }
     }
 }

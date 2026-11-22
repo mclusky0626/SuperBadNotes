@@ -21,24 +21,44 @@ actor ThumbnailCache {
     }
 
     func image(for url: URL, modified: Date, maxPixel: CGFloat) -> UIImage? {
-        let key = "\(url.path)#\(Int(modified.timeIntervalSince1970 * 1000))#\(Int(maxPixel))"
+        let key = "v2#\(url.path)#\(Int(modified.timeIntervalSince1970 * 1000))#\(Int(maxPixel))"
         if let hit = memory[key] { return hit }
 
         let name = SHA256.hash(data: Data(key.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
-        let file = folder.appendingPathComponent("\(name).jpg")
+        let file = folder.appendingPathComponent("\(name).png")
         if let data = try? Data(contentsOf: file), let image = UIImage(data: data) {
             remember(image, key)
             return image
         }
 
-        guard let document = PDFDocument(url: url), let page = document.page(at: 0) else { return nil }
-        let size = PageGeometry(page: page).canvasSize
-        guard size.width > 0, size.height > 0 else { return nil }
-        let scale = maxPixel / max(size.width, size.height)
-        let image = page.thumbnail(of: CGSize(width: size.width * scale, height: size.height * scale), for: .cropBox)
+        guard let document = PDFDocument(url: url), let page = document.page(at: 0),
+              let image = Self.render(page, maxPixel: maxPixel) else { return nil }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try? image.jpegData(compressionQuality: 0.85)?.write(to: file, options: .atomic)
+        // 손실 없는 PNG (JPEG는 글자·선 둘레가 뭉개짐)
+        try? image.pngData()?.write(to: file, options: .atomic)
         remember(image, key)
+        return image
+    }
+
+    /// 화면 픽셀 그대로 직접 그림 (PDFKit 썸네일은 배율이 들쭉날쭉하고 흐림)
+    private static func render(_ page: PDFPage, maxPixel: CGFloat) -> UIImage? {
+        let size = PageGeometry(page: page).canvasSize
+        guard size.width > 0, size.height > 0, maxPixel > 0 else { return nil }
+        let scale = maxPixel / max(size.width, size.height)
+        let pixels = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: pixels, format: format).image { context in
+            let cg = context.cgContext
+            cg.setFillColor(UIColor.white.cgColor)
+            cg.fill(CGRect(origin: .zero, size: pixels))
+            cg.interpolationQuality = .high
+            cg.setShouldAntialias(true)
+            cg.translateBy(x: 0, y: pixels.height)
+            cg.scaleBy(x: scale, y: -scale)
+            page.draw(with: .cropBox, to: cg)
+        }
         return image
     }
 

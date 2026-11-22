@@ -69,116 +69,7 @@ nonisolated enum PaperRenderer {
     // MARK: 표지
 
     static func drawCover(_ cover: CoverStyle, title: String?, in context: CGContext, rect: CGRect) {
-        let (base, detail) = cover.colors
-        let w = rect.width, h = rect.height
-        UIGraphicsPushContext(context)
-        defer { UIGraphicsPopContext() }
-        context.saveGState()
-        context.setFillColor(base.cgColor)
-        context.fill(rect)
-
-        switch cover {
-        case .stripes:
-            context.setStrokeColor(detail.withAlphaComponent(0.16).cgColor)
-            context.setLineWidth(w * 0.035)
-            var x = -h
-            while x < w {
-                context.move(to: CGPoint(x: rect.minX + x, y: rect.minY))
-                context.addLine(to: CGPoint(x: rect.minX + x + h, y: rect.maxY))
-                x += w * 0.11
-            }
-            context.strokePath()
-        case .waves:
-            context.setStrokeColor(detail.withAlphaComponent(0.22).cgColor)
-            context.setLineWidth(max(1, w * 0.006))
-            for row in 0..<14 {
-                let y0 = rect.minY + h * (0.06 + 0.068 * CGFloat(row))
-                context.move(to: CGPoint(x: rect.minX, y: y0))
-                var x: CGFloat = 0
-                while x <= w {
-                    context.addLine(to: CGPoint(x: rect.minX + x, y: y0 + sin(x / w * .pi * 4 + CGFloat(row)) * h * 0.012))
-                    x += 4
-                }
-            }
-            context.strokePath()
-        case .dots:
-            context.setFillColor(detail.withAlphaComponent(0.3).cgColor)
-            let step = w * 0.09, radius = w * 0.016
-            var row = 0
-            var y = rect.minY + step / 2
-            while y < rect.maxY {
-                var x = rect.minX + (row % 2 == 0 ? step / 2 : step)
-                while x < rect.maxX {
-                    context.fillEllipse(in: CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2))
-                    x += step
-                }
-                y += step * 0.87
-                row += 1
-            }
-        case .linen:
-            context.setStrokeColor(detail.withAlphaComponent(0.07).cgColor)
-            context.setLineWidth(0.6)
-            var x = rect.minX
-            while x < rect.maxX {
-                context.move(to: CGPoint(x: x, y: rect.minY))
-                context.addLine(to: CGPoint(x: x, y: rect.maxY))
-                x += 3
-            }
-            var y = rect.minY
-            while y < rect.maxY {
-                context.move(to: CGPoint(x: rect.minX, y: y))
-                context.addLine(to: CGPoint(x: rect.maxX, y: y))
-                y += 3
-            }
-            context.strokePath()
-        default:
-            // 단색 표지: 위는 살짝 밝게, 아래는 살짝 어둡게.
-            // PDF 그라데이션은 투명도를 못 담아서(불투명 흑백으로 칠해짐) 섞은 색을 직접 계산해서 씀
-            linearGradient([mixed(base, .white, 0.1), mixed(base, .black, 0.12)], in: context,
-                           from: CGPoint(x: rect.midX, y: rect.minY), to: CGPoint(x: rect.midX, y: rect.maxY))
-        }
-
-        // 책등 그림자 (역시 섞은 색으로)
-        context.saveGState()
-        context.clip(to: CGRect(x: rect.minX, y: rect.minY, width: w * 0.06, height: h))
-        linearGradient([mixed(base, .black, 0.28), base.cgColor], in: context,
-                       from: CGPoint(x: rect.minX, y: rect.midY), to: CGPoint(x: rect.minX + w * 0.06, y: rect.midY))
-        context.restoreGState()
-
-        // 제목 라벨
-        if let title, !title.isEmpty {
-            let label = CGRect(x: rect.minX + w * 0.16, y: rect.minY + h * 0.18, width: w * 0.68, height: h * 0.11)
-            detail.withAlphaComponent(0.93).setFill()
-            UIBezierPath(roundedRect: label, cornerRadius: w * 0.02).fill()
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.alignment = .center
-            paragraph.lineBreakMode = .byTruncatingTail
-            let font = UIFont.systemFont(ofSize: min(w * 0.055, label.height * 0.42), weight: .semibold)
-            let text = NSAttributedString(string: title, attributes: [
-                .font: font, .foregroundColor: base, .paragraphStyle: paragraph,
-            ])
-            let textHeight = font.lineHeight
-            text.draw(in: CGRect(x: label.minX + 8, y: label.midY - textHeight / 2,
-                                 width: label.width - 16, height: textHeight))
-        }
-        context.restoreGState()
-    }
-
-    /// 불투명한 두 색 사이 그라데이션
-    private static func linearGradient(_ colors: [CGColor], in context: CGContext, from start: CGPoint, to end: CGPoint) {
-        guard let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: colors as CFArray,
-                                        locations: [0, 1]) else { return }
-        context.drawLinearGradient(gradient, start: start, end: end, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
-    }
-
-    /// color에 other를 amount만큼 섞은 불투명 색
-    private static func mixed(_ color: UIColor, _ other: UIColor, _ amount: CGFloat) -> CGColor {
-        var r1: CGFloat = 0, g1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
-        var r2: CGFloat = 0, g2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
-        color.getRed(&r1, green: &g1, blue: &b1, alpha: &a1)
-        other.getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
-        return CGColor(srgbRed: r1 + (r2 - r1) * amount, green: g1 + (g2 - g1) * amount,
-                       blue: b1 + (b2 - b1) * amount, alpha: 1)
+        CoverArt.draw(cover, title: title, in: context, rect: rect)
     }
 
     // MARK: PDF
@@ -189,6 +80,15 @@ nonisolated enum PaperRenderer {
         return UIGraphicsPDFRenderer(bounds: rect).pdfData { context in
             context.beginPage()
             drawPaper(spec, in: context.cgContext, rect: rect)
+        }
+    }
+
+    /// 표지 한 장짜리 PDF (표지 바꾸기)
+    static func coverPDF(_ cover: CoverStyle, title: String, size: CGSize) -> Data {
+        let rect = CGRect(origin: .zero, size: size)
+        return UIGraphicsPDFRenderer(bounds: rect).pdfData { context in
+            context.beginPage()
+            drawCover(cover, title: title, in: context.cgContext, rect: rect)
         }
     }
 

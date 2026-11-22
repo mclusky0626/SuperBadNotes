@@ -39,41 +39,44 @@ nonisolated enum StrokeEditing {
         return false
     }
 
-    /// 부분 지우개: 지우개가 닿은 부분을 잘라 낸 새 획들. 안 닿았으면 nil, 다 지워졌으면 빈 배열
+    /// 부분 지우개: 획 모양(경로·굵기·질감)은 그대로 두고, 보이는 영역(마스크)에서 지우개 자국만 뺌.
+    /// 예전처럼 점을 다시 찍어 새 획을 만들면 곡선이 다시 계산돼서 남은 부분 모양이 변했음.
+    /// 안 닿았으면 nil, 남은 게 없으면 빈 배열
     static func erase(_ stroke: PKStroke, sampled: SampledStroke, from a: CGPoint, to b: CGPoint,
                       radius: CGFloat) -> [PKStroke]? {
         guard touches(sampled, from: a, to: b, radius: radius) else { return nil }
-        let t = stroke.transform
-        let scale = sampled.widthScale
-        let rotation = atan2(t.b, t.a)
+        // 지우개 자국(그림 좌표) → 획의 경로 좌표 (PencilKit 마스크는 경로 좌표)
+        let trail = CGMutablePath()
+        trail.move(to: a)
+        trail.addLine(to: b == a ? CGPoint(x: a.x + 0.01, y: a.y) : b)
+        var inverse = stroke.transform.inverted()
+        guard let bite = trail.copy(strokingWithWidth: radius * 2, lineCap: .round, lineJoin: .round, miterLimit: 1)
+            .copy(using: &inverse) else { return nil }
 
-        var runs: [[PKStrokePoint]] = []
-        var current: [PKStrokePoint] = []
-        var previous: CGPoint?
-        for p in stroke.path.interpolatedPoints(by: .distance(1.0)) {
-            let location = p.location.applying(t)
-            let direction = previous.map { atan2(p.location.y - $0.y, p.location.x - $0.x) } ?? 0
-            previous = p.location
-            let width = InkRenderer.renderWidth(p, stroke.ink.inkType, direction: direction) * scale
-            let gone = distance(location, toSegment: a, b) <= radius + width / 2
-                || !isVisible(sampled, pathPoint: p.location, drawingPoint: location)
-            if gone {
-                if current.count >= 2 { runs.append(current) }
-                current = []
-                continue
-            }
-            current.append(PKStrokePoint(location: location, timeOffset: p.timeOffset,
-                                         size: CGSize(width: p.size.width * scale, height: p.size.height * scale),
-                                         opacity: p.opacity, force: p.force, azimuth: p.azimuth + rotation,
-                                         altitude: p.altitude, secondaryScale: p.secondaryScale))
+        let visible: CGPath
+        if let mask = stroke.mask?.cgPath, sampled.maskSpace != .drawing {
+            visible = mask
+        } else if let mask = stroke.mask?.cgPath {
+            // 예전 방식(그림 좌표) 마스크면 경로 좌표로 옮김
+            var t = inverse
+            visible = mask.copy(using: &t) ?? mask
+        } else {
+            let margin = max(24, radius * 2)
+            let area = stroke.renderBounds.applying(inverse).insetBy(dx: -margin, dy: -margin)
+            visible = CGPath(rect: area, transform: nil)
         }
-        if current.count >= 2 { runs.append(current) }
+        let remaining = visible.subtracting(bite)
+        // 남은 부분 중 획이 지나가는 곳이 하나도 없으면 획째 지움
+        guard !remaining.isEmpty,
+              sampled.points.contains(where: { remaining.contains($0.location) }) else { return [] }
+        return [PKStroke(ink: stroke.ink, path: stroke.path, transform: stroke.transform,
+                         mask: UIBezierPath(cgPath: remaining), randomSeed: stroke.randomSeed)]
+    }
 
-        return runs.map { run in
-            PKStroke(ink: stroke.ink,
-                     path: PKStrokePath(controlPoints: run, creationDate: stroke.path.creationDate),
-                     transform: .identity, mask: nil, randomSeed: UInt32.random(in: 1...UInt32.max))
-        }
+    /// 형광펜 획인지 (BadNotes 형광펜 = 반투명 볼펜, PencilKit 형광펜 = 마커)
+    static func isHighlighter(_ stroke: PKStroke) -> Bool {
+        if stroke.ink.inkType == .marker { return true }
+        return stroke.ink.inkType == .monoline && stroke.ink.color.cgColor.alpha < 0.95
     }
 
     /// 픽셀 지우개로 이미 지워진(마스크 밖) 점인지

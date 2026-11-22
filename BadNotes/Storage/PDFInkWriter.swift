@@ -11,6 +11,12 @@
 import PDFKit
 import PencilKit
 
+/// 한 페이지에 넣을 것. nil이면 그 종류는 손대지 않음
+nonisolated struct PageContent: @unchecked Sendable {
+    var drawing: PKDrawing?
+    var elements: [PageElement]?
+}
+
 nonisolated enum PDFInkWriter {
     struct Report: Sendable {
         var pages: Int
@@ -38,9 +44,17 @@ nonisolated enum PDFInkWriter {
         }
     }
 
-    /// `pages`의 필기로 해당 페이지들을 바꿔서 `url`에 저장. 빈 PKDrawing은 그 페이지 필기 삭제.
-    /// `appending`: 맨 뒤에 붙일 페이지들 (한 장짜리 PDF 데이터). 필기보다 먼저 붙여서 새 페이지 필기도 같이 저장됨
+    /// `pages`의 필기로 해당 페이지들을 바꿔서 `url`에 저장 (요소는 그대로 둠)
     static func apply(_ pages: [Int: PKDrawing], appending newPages: [Data] = [], to url: URL) throws -> Report {
+        try apply(content: pages.mapValues { PageContent(drawing: $0, elements: nil) }, images: [:],
+                  appending: newPages, to: url)
+    }
+
+    /// 페이지마다 필기·요소를 바꿔서 `url`에 저장. nil인 쪽은 손대지 않음, 비어 있으면 그 페이지에서 삭제.
+    /// `images`: 요소가 쓰는 사진 원본. `appending`: 맨 뒤에 붙일 페이지들 (한 장짜리 PDF 데이터).
+    /// 페이지를 먼저 붙여서 새 페이지 내용도 같이 저장됨
+    static func apply(content pages: [Int: PageContent], images: [String: Data], appending newPages: [Data] = [],
+                      to url: URL) throws -> Report {
         let start = Date()
         let data = try NoteLoader.coordinatedRead(url)
         guard let document = PDFDocument(data: data) else { throw WriteError.unreadable }
@@ -56,16 +70,32 @@ nonisolated enum PDFInkWriter {
             document.insert(page, at: document.pageCount)
         }
 
-        for (index, drawing) in pages.sorted(by: { $0.key < $1.key }) {
+        for (index, content) in pages.sorted(by: { $0.key < $1.key }) {
             guard index >= 0, index < document.pageCount, let page = document.page(at: index) else {
                 throw WriteError.pageOutOfRange(index, document.pageCount)
             }
-            // 읽을 수 있는 BadNotes 필기만 교체. 깨진 건 손대지 않음
-            for old in InkPayload.read(from: page).annotations {
+            let geometry = PageGeometry(page: page)
+            // 읽을 수 있는 BadNotes 주석만 교체. 깨진 건 손대지 않음.
+            // 요소 → 필기 순서로 다시 붙여서 다른 앱에서도 필기가 위에 보이게 함
+            let ink = InkPayload.read(from: page)
+            let placed = ElementPayload.read(from: page)
+            for old in ink.annotations + placed.annotations {
                 page.removeAnnotation(old)
             }
-            if !drawing.strokes.isEmpty {
-                page.addAnnotation(try InkAnnotation(drawing: drawing, geometry: PageGeometry(page: page)))
+            if let elements = content.elements {
+                if !elements.isEmpty {
+                    let pool = images.merging(placed.images) { a, _ in a }
+                    page.addAnnotation(try ElementAnnotation(elements: elements, images: pool, geometry: geometry))
+                }
+            } else {
+                for old in placed.annotations { page.addAnnotation(old) }
+            }
+            if let drawing = content.drawing {
+                if !drawing.strokes.isEmpty {
+                    page.addAnnotation(try InkAnnotation(drawing: drawing, geometry: geometry))
+                }
+            } else {
+                for old in ink.annotations { page.addAnnotation(old) }
             }
         }
 
@@ -83,24 +113,98 @@ nonisolated enum PDFInkWriter {
         return Report(pages: pages.count + newPages.count, bytes: bytes, seconds: Date().timeIntervalSince(start))
     }
 
-    private static func verify(_ url: URL, pageCount: Int, expected: [Int: PKDrawing]) throws {
+    /// 노트북 표지를 새로 그린 것으로 바꿈 (표지가 없으면 맨 앞에 넣음). 표지 위 필기는 새 표지로 옮김.
+    /// 돌려주는 값: 표지를 새로 넣었으면 true (페이지 번호가 하나씩 밀림)
+    @discardableResult
+    static func replaceCover(of url: URL, with cover: CoverStyle, title: String) throws -> Bool {
+        try? BackupStore.snapshot(url, reason: "cover")
+        let data = try NoteLoader.coordinatedRead(url)
+        guard let document = PDFDocument(data: data), let first = document.page(at: 0) else { throw WriteError.unreadable }
+        if document.isLocked { throw WriteError.locked }
+        let hadCover = PaperSpec.hasCover(document.documentAttributes)
+        let size = PageGeometry(page: first).canvasSize
+        let coverData = PaperRenderer.coverPDF(cover, title: title, size: size)
+        guard let source = PDFDocument(data: coverData), let page = source.page(at: 0) else { throw WriteError.unreadable }
+
+        // 옛 표지 위의 BadNotes 필기·요소는 읽어서 새 표지에 새로 만들어 붙임
+        // (주석 객체를 그대로 옮기면 /BNInk 같은 편집용 원본이 떨어져 나감)
+        var ink = InkPayload.ReadResult()
+        var placed = ElementPayload.ReadResult()
+        var others: [PDFAnnotation] = []
+        if hadCover {
+            ink = InkPayload.read(from: first)
+            placed = ElementPayload.read(from: first)
+            let ours = Set((ink.annotations + placed.annotations).map(ObjectIdentifier.init))
+            others = first.annotations.filter { !ours.contains(ObjectIdentifier($0)) }
+            document.removePage(at: 0)
+        }
+        document.insert(page, at: 0)
+        let geometry = PageGeometry(page: page)
+        if !placed.elements.isEmpty {
+            page.addAnnotation(try ElementAnnotation(elements: placed.elements, images: placed.images, geometry: geometry))
+        }
+        if !ink.drawing.strokes.isEmpty {
+            page.addAnnotation(try InkAnnotation(drawing: ink.drawing, geometry: geometry))
+        }
+        for annotation in others {
+            first.removeAnnotation(annotation)
+            page.addAnnotation(annotation)
+        }
+
+        var attributes = document.documentAttributes ?? [:]
+        var keywords = PaperSpec.keywords(attributes).filter { !$0.hasPrefix(PaperSpec.coverPrefix) }
+        if !keywords.contains("BadNotes") { keywords.insert("BadNotes", at: 0) }
+        keywords.append("\(PaperSpec.coverPrefix)\(cover.rawValue)")
+        attributes[PDFDocumentAttribute.keywordsAttribute] = keywords
+        document.documentAttributes = attributes
+
+        let pageCount = document.pageCount
+        let fm = FileManager.default
+        let tempDir = try fm.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: url, create: true)
+        defer { try? fm.removeItem(at: tempDir) }
+        let temp = tempDir.appendingPathComponent(url.lastPathComponent)
+        guard document.write(to: temp) else { throw WriteError.writeFailed }
+        guard let check = PDFDocument(url: temp), check.pageCount == pageCount else {
+            throw WriteError.verifyFailed("표지를 바꾼 PDF를 다시 열 수 없음")
+        }
+        try replace(url, with: temp)
+        withExtendedLifetime(source) {}
+        return !hadCover
+    }
+
+    private static func verify(_ url: URL, pageCount: Int, expected: [Int: PageContent]) throws {
         guard let document = PDFDocument(url: url) else {
             throw WriteError.verifyFailed("다시 열 수 없음")
         }
         guard document.pageCount == pageCount else {
             throw WriteError.verifyFailed("쪽수 \(document.pageCount) ≠ \(pageCount)")
         }
-        for (index, drawing) in expected {
+        for (index, content) in expected {
             guard let page = document.page(at: index) else {
                 throw WriteError.verifyFailed("\(index + 1)쪽 없음")
             }
-            let read = InkPayload.read(from: page)
-            if let problem = read.problems.first {
-                throw WriteError.verifyFailed("\(index + 1)쪽: \(problem)")
+            if let drawing = content.drawing {
+                let read = InkPayload.read(from: page)
+                if let problem = read.problems.first {
+                    throw WriteError.verifyFailed("\(index + 1)쪽: \(problem)")
+                }
+                if read.drawing.strokes.count != drawing.strokes.count {
+                    throw WriteError.verifyFailed(
+                        "\(index + 1)쪽 획 수 \(read.drawing.strokes.count) ≠ \(drawing.strokes.count)")
+                }
             }
-            if read.drawing.strokes.count != drawing.strokes.count {
-                throw WriteError.verifyFailed(
-                    "\(index + 1)쪽 획 수 \(read.drawing.strokes.count) ≠ \(drawing.strokes.count)")
+            if let elements = content.elements {
+                let read = ElementPayload.read(from: page)
+                if let problem = read.problems.first {
+                    throw WriteError.verifyFailed("\(index + 1)쪽: \(problem)")
+                }
+                if read.elements.count != elements.count {
+                    throw WriteError.verifyFailed("\(index + 1)쪽 요소 수 \(read.elements.count) ≠ \(elements.count)")
+                }
+                let missing = Set(elements.compactMap(\.imageID)).subtracting(read.images.keys)
+                if !missing.isEmpty {
+                    throw WriteError.verifyFailed("\(index + 1)쪽 사진 \(missing.count)장이 빠짐")
+                }
             }
         }
     }

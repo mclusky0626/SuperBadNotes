@@ -18,6 +18,27 @@ import UIKit
 
 /// 획을 구분하는 값. 같은 획이면 같은 키 → 샘플링 결과를 다시 계산하지 않음
 nonisolated struct StrokeKey: Hashable, Sendable {
+    /// 경로 모양의 지문 (같은 실행 안에서만 비교하므로 Hasher를 써도 됨)
+    private static func fingerprint(_ path: CGPath) -> Int {
+        var hasher = Hasher()
+        path.applyWithBlock { element in
+            let e = element.pointee
+            hasher.combine(e.type.rawValue)
+            let count: Int
+            switch e.type {
+            case .moveToPoint, .addLineToPoint: count = 1
+            case .addQuadCurveToPoint: count = 2
+            case .addCurveToPoint: count = 3
+            default: count = 0
+            }
+            for i in 0..<count {
+                hasher.combine(e.points[i].x)
+                hasher.combine(e.points[i].y)
+            }
+        }
+        return hasher.finalize()
+    }
+
     private let created: Double
     private let seed: UInt32
     private let count: Int
@@ -34,8 +55,10 @@ nonisolated struct StrokeKey: Hashable, Sendable {
         transform = [t.a, t.b, t.c, t.d, t.tx, t.ty]
         ink = stroke.ink.inkType.rawValue
         color = InkRenderer.resolvedColor(stroke.ink.color).components ?? []
-        if let m = stroke.mask?.bounds {
-            mask = [m.minX, m.minY, m.width, m.height]
+        if let path = stroke.mask?.cgPath {
+            // 부분 지우개는 마스크를 조금씩 깎아서, 바깥 테두리(bounds)는 그대로인데 모양만 바뀜 → 모양 전체로 구분
+            let m = path.boundingBoxOfPath
+            mask = [m.minX, m.minY, m.width, m.height, CGFloat(Self.fingerprint(path))]
         } else {
             mask = []
         }

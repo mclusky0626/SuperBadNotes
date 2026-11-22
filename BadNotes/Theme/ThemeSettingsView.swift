@@ -66,19 +66,22 @@ struct ThemeSettingsView: View {
             Section {
                 PhotosPicker(selection: $photoItem, matching: .images) {
                     HStack(spacing: 14) {
-                        Group {
-                            if let photo = store.photo {
-                                Image(uiImage: photo).resizable().scaledToFill()
-                            } else {
-                                Image(systemName: "photo.badge.plus")
-                                    .font(.title2)
-                                    .foregroundStyle(store.accent)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .background(Color.primary.opacity(0.06))
+                        Color.clear
+                            .frame(width: 64, height: 64)
+                            .overlay {
+                                if let photo = store.photo {
+                                    // 꽉 채운 사진이 틀 밖으로 넘쳐도 터치는 틀 안에서만
+                                    Image(uiImage: photo).resizable().scaledToFill().allowsHitTesting(false)
+                                } else {
+                                    Image(systemName: "photo.badge.plus")
+                                        .font(.title2)
+                                        .foregroundStyle(store.accent)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                        .background(Color.primary.opacity(0.06))
+                                }
                             }
-                        }
-                        .frame(width: 64, height: 64)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         VStack(alignment: .leading, spacing: 2) {
                             Text(store.photo == nil ? "바탕 이미지 고르기" : "다른 이미지로 바꾸기")
                                 .font(.body.weight(.semibold))
@@ -263,10 +266,13 @@ struct ThemePreview: View {
             .padding(20)
         }
         .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
         }
+        // 보여 주기만 하는 화면. 안의 가짜 버튼이 옆 옵션 터치를 가로채지 않게
+        .allowsHitTesting(false)
     }
 }
 

@@ -23,8 +23,9 @@ struct ThemeBackground: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                base
+                Color.clear
                     .frame(width: geo.size.width, height: geo.size.height)
+                    .overlay { base }
                     .scaleEffect(parallaxOn ? 1.08 : 1)
                     .offset(parallaxOn ? motion.offset : .zero)
                     .animation(.interactiveSpring(response: 0.35, dampingFraction: 0.9), value: motion.offset)
@@ -38,6 +39,9 @@ struct ThemeBackground: View {
             }
         }
         .ignoresSafeArea()
+        // 바탕은 보이기만 함. 사진을 꽉 채우면(scaledToFill) 그림이 틀 밖으로 넘치는데,
+        // clipped()는 그리기만 자르고 터치 영역은 안 자름 → 옆에 있는 버튼·슬라이더 터치를 먹어 버림
+        .allowsHitTesting(false)
         .onAppear { if parallaxOn { motion.start() } }
         .onDisappear { if parallaxOn { motion.stop() } }
         .onChange(of: parallaxOn) { _, on in

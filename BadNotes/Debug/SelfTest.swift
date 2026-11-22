@@ -45,6 +45,9 @@ nonisolated enum SelfTest {
             await pencilKitMatchTests(results)
             try await documentTests(root: root, results)
             try await notebookTests(root: root, results)
+            try elementTests(root: root, results)
+            try coverTests(root: root, results)
+            await maskMatchesPencilKit(results)
         } catch {
             results.check("예외 없이 끝남", false, "\(error)")
         }
@@ -235,11 +238,39 @@ nonisolated enum SelfTest {
         let sampled = InkRenderer.sample(horizontal)
         let pieces = StrokeEditing.erase(horizontal, sampled: sampled, from: CGPoint(x: 100, y: 80),
                                          to: CGPoint(x: 100, y: 120), radius: 5)
-        r.check("부분 지우개: 가운데를 지우면 두 조각", pieces?.count == 2, "\(pieces?.count ?? -1)")
-        if let pieces, pieces.count == 2 {
-            let left = pieces[0].renderBounds, right = pieces[1].renderBounds
-            r.check("부분 지우개: 지운 자리는 비어 있음", left.maxX < 96 && right.minX > 104, "\(left) / \(right)")
+        r.check("부분 지우개: 획은 하나 그대로, 마스크로만 잘림", pieces?.count == 1 && pieces?.first?.mask != nil,
+                "\(pieces?.count ?? -1)")
+        if let cut = pieces?.first {
+            let same = cut.path.count == horizontal.path.count
+                && zip(cut.path, horizontal.path).allSatisfy { $0.location == $1.location && $0.size == $1.size }
+            r.check("부분 지우개: 남은 획 모양(점·굵기·씨앗)이 안 바뀜", same && cut.randomSeed == horizontal.randomSeed)
+            let image = renderStrokes([cut], size: CGSize(width: 220, height: 200))
+            r.check("부분 지우개: 지운 자리는 비고 양옆은 남음",
+                    luminance(image, at: CGPoint(x: 100, y: 100)) > 0.9
+                        && luminance(image, at: CGPoint(x: 60, y: 100)) < 0.5
+                        && luminance(image, at: CGPoint(x: 140, y: 100)) < 0.5,
+                    "가운데 \(luminance(image, at: CGPoint(x: 100, y: 100)))")
+            // 한 번 더 지우면 마스크 모양이 바뀌어서 다른 획으로 알아봐야 다시 그림
+            let s2 = InkRenderer.sample(cut)
+            if let again = StrokeEditing.erase(cut, sampled: s2, from: CGPoint(x: 40, y: 80), to: CGPoint(x: 40, y: 120),
+                                               radius: 5)?.first {
+                r.check("부분 지우개: 두 번째로 지우면 키가 바뀜", StrokeKey(again) != StrokeKey(cut))
+                let twice = renderStrokes([again], size: CGSize(width: 220, height: 200))
+                r.check("부분 지우개: 두 군데 다 비어 있음",
+                        luminance(twice, at: CGPoint(x: 40, y: 100)) > 0.9 && luminance(twice, at: CGPoint(x: 100, y: 100)) > 0.9
+                            && luminance(twice, at: CGPoint(x: 70, y: 100)) < 0.5)
+            } else {
+                r.check("부분 지우개: 두 번째 지우기", false, "안 닿음")
+            }
         }
+        let wiped = StrokeEditing.erase(horizontal, sampled: sampled, from: CGPoint(x: -10, y: 100),
+                                        to: CGPoint(x: 210, y: 100), radius: 30)
+        r.check("부분 지우개: 전부 지우면 획이 없어짐", wiped?.isEmpty == true, "\(wiped?.count ?? -1)")
+        let highlight = line(.monoline, UIColor.systemYellow.withAlphaComponent(0.5), .zero, CGPoint(x: 50, y: 0), width: 12)
+        r.check("형광펜만 지우기: 형광펜·마커는 형광펜, 펜은 아님",
+                StrokeEditing.isHighlighter(highlight)
+                    && StrokeEditing.isHighlighter(line(.marker, .systemYellow, .zero, CGPoint(x: 50, y: 0), width: 12))
+                    && !StrokeEditing.isHighlighter(horizontal))
         r.check("부분 지우개: 안 닿으면 그대로",
                 StrokeEditing.erase(horizontal, sampled: sampled, from: CGPoint(x: 100, y: 150),
                                     to: CGPoint(x: 120, y: 150), radius: 5) == nil)
@@ -541,6 +572,175 @@ nonisolated enum SelfTest {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("selftest-artifacts", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    // MARK: 텍스트 상자·메모지·사진
+
+    private static func elementTests(root: URL, _ r: Results) throws {
+        let url = root.appendingPathComponent("Elements.pdf")
+        try makePDF(url)
+        // 점검용 사진: 빨강 왼쪽 + 파랑 오른쪽
+        let photo = UIGraphicsImageRenderer(size: CGSize(width: 400, height: 300)).image { ctx in
+            UIColor.red.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 200, height: 300))
+            UIColor.blue.setFill()
+            ctx.fill(CGRect(x: 200, y: 0, width: 200, height: 300))
+        }
+        guard let prepared = ElementImages.prepare(photo.pngData() ?? Data()) else {
+            throw TestError(description: "사진 준비 실패")
+        }
+        r.check("사진: 준비하면 번호와 크기가 생김", !prepared.id.isEmpty && prepared.size.width >= 399, "\(prepared.size)")
+
+        var plain = PageElement(kind: .text, x: 40, y: 40, width: 200, height: 30)
+        plain.text = "안녕 BadNotes"
+        plain.height = ElementRenderer.fittedHeight(plain)
+        var colored = PageElement(kind: .text, x: 40, y: 120, width: 200, height: 60)
+        colored.text = "색 바탕"
+        colored.fill = .color
+        colored.fillColor = RGBAColor(hex: 0x00C000)
+        var glass = PageElement(kind: .text, x: 300, y: 40, width: 200, height: 60)
+        glass.text = "유리"
+        glass.fill = .glass
+        var sticky = PageElement(kind: .sticky, x: 300, y: 140, width: 200, height: 200)
+        sticky.text = "메모"
+        var picture = PageElement(kind: .image, x: 40, y: 400, width: 200, height: 150)
+        picture.imageID = prepared.id
+        let elements = [plain, colored, glass, sticky, picture]
+
+        var longer = plain
+        longer.text = String(repeating: "줄이 늘어나면 상자도 길어져요 ", count: 6)
+        r.check("텍스트 상자: 글이 길면 높이가 늘어남", ElementRenderer.fittedHeight(longer) > plain.height * 2,
+                "\(ElementRenderer.fittedHeight(longer)) / \(plain.height)")
+
+        let d = PKDrawing(strokes: [line(.pen, .black, CGPoint(x: 40, y: 600), CGPoint(x: 300, y: 600), width: 4)])
+        _ = try PDFInkWriter.apply(content: [0: PageContent(drawing: d, elements: elements)],
+                                   images: [prepared.id: prepared.data], to: url)
+        keep(url, as: "elements.pdf")
+        let loaded = try NoteLoader.load(url)
+        r.check("요소: PDF에 넣고 다시 읽으면 그대로", loaded.elements[0] == elements,
+                "\(loaded.elements[0]?.count ?? 0)개")
+        r.check("요소: 사진 원본도 같이 저장", loaded.images[prepared.id] == prepared.data)
+        r.check("요소: 필기도 같이 그대로", loaded.drawings[0]?.strokes.count == 1)
+        r.check("요소: 화면용 문서에서는 주석을 떼어 냄", loaded.pdf.page(at: 0)?.annotations.isEmpty == true)
+
+        if let saved = PDFDocument(url: url), let page = saved.page(at: 0) {
+            let order = page.annotations.map { isInk($0) ? "ink" : ($0.value(forAnnotationKey: ElementPayload.elementsKey) != nil ? "el" : "?") }
+            r.check("요소: 다른 앱에서도 필기가 요소 위에 (주석 순서)", order == ["el", "ink"], "\(order)")
+            let image = render(page)
+            keep(image, as: "elements.png")
+            let fill = rgb(image, at: CGPoint(x: 45, y: 125))
+            r.check("요소: 색 바탕이 다른 앱에서도 보임", fill.g > 0.6 && fill.r < 0.3, "\(fill)")
+            let left = rgb(image, at: CGPoint(x: 80, y: 475)), right = rgb(image, at: CGPoint(x: 200, y: 475))
+            r.check("요소: 사진이 다른 앱에서도 보임", left.r > 0.8 && left.b < 0.3 && right.b > 0.8 && right.r < 0.3,
+                    "\(left) / \(right)")
+            let text = luminance(image, at: CGPoint(x: 52, y: 40 + plain.padding.height + 10))
+            _ = text
+        }
+
+        // 필기만 바꿔 저장하면 요소는 그대로
+        _ = try PDFInkWriter.apply([0: PKDrawing()], to: url)
+        let inkOnly = try NoteLoader.load(url)
+        r.check("요소: 필기만 저장해도 요소는 남음", inkOnly.elements[0]?.count == elements.count && inkOnly.drawings[0] == nil)
+        // 요소를 다 지우면 주석도 사라짐
+        _ = try PDFInkWriter.apply(content: [0: PageContent(drawing: nil, elements: [])], images: [:], to: url)
+        r.check("요소: 다 지우면 PDF에서도 없어짐", try NoteLoader.load(url).elements[0] == nil)
+
+        // 복구 기록
+        let journal = DrawingJournal(directory: root.appendingPathComponent("ElementJournal", isDirectory: true))
+        try journal.write(elements, images: [prepared.id: prepared.data], page: 2)
+        let recovered = journal.load()
+        r.check("요소: 복구 기록에서 되살림", recovered.elements[2] == elements && recovered.images[prepared.id] == prepared.data)
+        journal.remove(page: 2)
+        r.check("요소: 복구 기록 지우기", journal.load().elements[2] == nil)
+    }
+
+    // MARK: 표지
+
+    private static func coverTests(root: URL, _ r: Results) throws {
+        var blank = 0
+        for style in CoverStyle.allCases {
+            let size = CGSize(width: 120, height: 170)
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            let image = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+                CoverArt.draw(style, title: "점검", in: ctx.cgContext, rect: CGRect(origin: .zero, size: size))
+            }.cgImage
+            // 제목 판 안쪽(글자 없는 곳)과 바탕이 구분되는지
+            let base = rgb(image, at: CGPoint(x: 95, y: 95)), plate = rgb(image, at: CGPoint(x: 23, y: 29))
+            if abs(base.r - plate.r) + abs(base.g - plate.g) + abs(base.b - plate.b) < 0.05 {
+                blank += 1
+                print("[SELFTEST] INFO 밋밋한 표지: \(style.rawValue) 바탕 \(base) 판 \(plate)")
+            }
+        }
+        r.check("표지 \(CoverStyle.allCases.count)가지: 전부 그려지고 제목 자리가 보임", blank == 0, "밋밋한 표지 \(blank)개")
+
+        let folder = root.appendingPathComponent("Covers", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let paper = PaperSpec(template: .grid, tone: .white, size: .a4Portrait)
+        let url = folder.appendingPathComponent("표지 점검.pdf")
+        try PaperRenderer.notebookPDF(name: "표지 점검", cover: .navy, paper: paper).write(to: url)
+        let d = PKDrawing(strokes: [line(.pen, .white, CGPoint(x: 100, y: 700), CGPoint(x: 400, y: 700), width: 6)])
+        _ = try PDFInkWriter.apply([0: d], to: url)
+        let inserted = try PDFInkWriter.replaceCover(of: url, with: .waves, title: "표지 점검")
+        let changed = try NoteLoader.load(url)
+        let keywords = PaperSpec.keywords(changed.pdf.documentAttributes)
+        r.check("표지 바꾸기: 쪽수 그대로, 표지 이름 바뀜",
+                !inserted && changed.pdf.pageCount == 2 && keywords.contains("BadNotesCover=waves")
+                    && !keywords.contains("BadNotesCover=navy") && PaperSpec.from(documentAttributes: changed.pdf.documentAttributes) == paper,
+                "\(keywords)")
+        r.check("표지 바꾸기: 표지 위 필기는 새 표지로 옮겨짐", changed.drawings[0]?.strokes.count == 1)
+        if let saved = PDFDocument(url: url), let cover = saved.page(at: 0) {
+            let sea = rgb(render(cover), at: CGPoint(x: 300, y: 820))
+            keep(render(cover), as: "cover-waves.png")
+            r.check("표지 바꾸기: 새 그림으로 그려짐 (바다)", sea.b > sea.r && sea.g > sea.r, "\(sea)")
+        }
+        let plainURL = folder.appendingPathComponent("그냥 PDF.pdf")
+        try makePDF(plainURL)
+        let added = try PDFInkWriter.replaceCover(of: plainURL, with: .dots, title: "그냥 PDF")
+        let withCover = try NoteLoader.load(plainURL)
+        r.check("표지 바꾸기: 표지 없던 PDF는 맨 앞에 넣음",
+                added && withCover.pdf.pageCount == 4 && PaperSpec.hasCover(withCover.pdf.documentAttributes))
+        let key1 = AppPaths.key(for: url), key2 = AppPaths.key(for: plainURL)
+        try? FileManager.default.removeItem(at: AppPaths.backups.appendingPathComponent(key1))
+        try? FileManager.default.removeItem(at: AppPaths.backups.appendingPathComponent(key2))
+    }
+
+    /// 부분 지우개 마스크를 PencilKit(Apple 도구 모드)도 같은 자리로 알아듣는지
+    @MainActor
+    private static func maskMatchesPencilKit(_ r: Results) {
+        let stroke = line(.pen, .black, CGPoint(x: 0, y: 100), CGPoint(x: 200, y: 100), width: 4)
+        guard let cut = StrokeEditing.erase(stroke, sampled: InkRenderer.sample(stroke), from: CGPoint(x: 100, y: 80),
+                                            to: CGPoint(x: 100, y: 120), radius: 5)?.first else {
+            r.check("PencilKit도 지운 자리를 똑같이 비움", false, "안 지워짐")
+            return
+        }
+        let image = PKDrawing(strokes: [cut]).image(from: CGRect(x: 0, y: 0, width: 220, height: 200), scale: 1).cgImage
+        func dark(_ x: CGFloat) -> Bool {
+            guard let image else { return false }
+            var pixel = [UInt8](repeating: 0, count: 4)
+            pixel.withUnsafeMutableBytes { buffer in
+                guard let context = CGContext(data: buffer.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                              space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+                context.draw(image, in: CGRect(x: -x, y: -(CGFloat(image.height) - 100 - 1),
+                                               width: CGFloat(image.width), height: CGFloat(image.height)))
+            }
+            return pixel[3] > 128
+        }
+        r.check("PencilKit도 지운 자리를 똑같이 비움", dark(60) && dark(140) && !dark(100),
+                "왼쪽 \(dark(60)) 가운데 \(dark(100)) 오른쪽 \(dark(140))")
+    }
+
+    /// 우리 렌더러로 획을 그린 그림 (흰 바탕, 1pt = 1px)
+    private static func renderStrokes(_ strokes: [PKStroke], size: CGSize) -> CGImage? {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            for stroke in strokes { InkRenderer.draw(InkRenderer.sample(stroke), in: ctx.cgContext, smooth: true) }
+        }.cgImage
     }
 
     private static func keep(_ file: URL, as name: String) {

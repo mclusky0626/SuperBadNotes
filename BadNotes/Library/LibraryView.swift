@@ -71,6 +71,7 @@ struct LibraryFolderView: View {
     @State private var renameText = ""
     @State private var deleting: LibraryItem?
     @State private var moving: LibraryItem?
+    @State private var recovering: LibraryItem?
 
     private var folder: URL {
         if case .folder(let url) = mode { return url }
@@ -106,6 +107,17 @@ struct LibraryFolderView: View {
         .task(id: library.revision) { await reload() }
         .sheet(isPresented: $showNewNotebook) {
             NewNotebookSheet(folder: folder) { url in onOpen(url) }
+        }
+        .sheet(item: $recovering) { item in
+            ChangeCoverSheet(item: item) { style in
+                act("표지 바꾸기") {
+                    let inserted = try PDFInkWriter.replaceCover(of: item.url, with: style, title: item.name)
+                    // 표지를 새로 넣었으면 보던 페이지가 한 장씩 밀림
+                    if inserted, let page = ReadingPosition.page(for: item.url) { ReadingPosition.set(page + 1, for: item.url) }
+                    Log.info("표지 바꿈: \(item.name) → \(style.title)")
+                    library.changed()
+                }
+            }
         }
         .sheet(item: $moving) { item in
             MoveSheet(item: item) { destination in
@@ -155,6 +167,7 @@ struct LibraryFolderView: View {
                                   onFavorite: { library.toggleFavorite(item.url) },
                                   onRename: { renameText = item.name; renaming = item },
                                   onMove: { moving = item },
+                                  onCover: { recovering = item },
                                   onDelete: { deleting = item })
         if item.isFolder {
             NavigationLink(value: item.url) { content }
@@ -280,6 +293,7 @@ struct LibraryCard: View {
     let onFavorite: () -> Void
     let onRename: () -> Void
     let onMove: () -> Void
+    let onCover: () -> Void
     let onDelete: () -> Void
 
     @State private var thumbnail: UIImage?
@@ -331,10 +345,11 @@ struct LibraryCard: View {
         .frame(width: box.width + 40)
         .contentShape(Rectangle())
         .contextMenu { menuItems }
-        .task(id: item.modified) {
+        // 카드 크기를 키우면 그 크기에 맞게 다시 그림 (작은 그림을 늘리면 흐려짐). 64픽셀 단위로 묶어서 슬라이더 끌 때 덜 그림
+        .task(id: ThumbnailRequest(modified: item.modified, pixels: (box.height * displayScale / 64).rounded(.up) * 64)) {
             guard !item.isFolder else { return }
-            thumbnail = await ThumbnailCache.shared.image(for: item.url, modified: item.modified,
-                                                         maxPixel: box.height * displayScale)
+            let pixels = (box.height * displayScale / 64).rounded(.up) * 64
+            thumbnail = await ThumbnailCache.shared.image(for: item.url, modified: item.modified, maxPixel: pixels)
         }
     }
 
@@ -345,12 +360,20 @@ struct LibraryCard: View {
         }
         Button("이름 바꾸기", systemImage: "pencil", action: onRename)
         Button("옮기기", systemImage: "folder", action: onMove)
+        if !item.isFolder {
+            Button("표지 바꾸기", systemImage: "book.closed", action: onCover)
+        }
         Divider()
         Button("삭제", systemImage: "trash", role: .destructive, action: onDelete)
     }
 }
 
 /// 폴더 카드 그림
+private struct ThumbnailRequest: Equatable {
+    let modified: Date
+    let pixels: CGFloat
+}
+
 struct FolderIcon: View {
     @Environment(ThemeStore.self) private var themes
     let box: CGSize

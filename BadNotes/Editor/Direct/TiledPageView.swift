@@ -107,13 +107,18 @@ nonisolated final class InkTileRenderer: TileRenderer, @unchecked Sendable {
 }
 
 /// 페이지 한 장. 좌표계 = 페이지 캔버스 좌표 (필기 데이터 좌표와 같음)
+/// 쌓는 순서: PDF 타일 → 요소(텍스트 상자·메모지·사진) → 필기 타일 → 선택 테두리
 final class PageView: UIView {
     let index: Int
     let ink: PageInk
     private let pdfTiles: TiledView
     private let inkTiles: TiledView
+    private let elementLayer = UIView()
+    private(set) var elementViews: [UUID: ElementView] = [:]
+    let selectionFrame = SelectionFrameView()
 
-    init(index: Int, page: PDFPage, size: CGSize, ink: PageInk, documentLock: ReadWriteLock) {
+    /// showsInk: Apple 도구 모드에서는 필기를 PencilKit이 직접 그려서 끔
+    init(index: Int, page: PDFPage, size: CGSize, ink: PageInk, documentLock: ReadWriteLock, showsInk: Bool = true) {
         self.index = index
         self.ink = ink
         let rect = CGRect(origin: .zero, size: size)
@@ -127,8 +132,37 @@ final class PageView: UIView {
         layer.shadowOffset = CGSize(width: 0, height: 3)
         layer.shadowPath = UIBezierPath(rect: rect).cgPath
         addSubview(pdfTiles)
-        addSubview(inkTiles)
+        elementLayer.frame = rect
+        elementLayer.isUserInteractionEnabled = true
+        // 자르기(clipsToBounds)를 켜면 따로 그려져서 유리가 뒤의 종이를 못 봄
+        addSubview(elementLayer)
+        if showsInk { addSubview(inkTiles) }
+        addSubview(selectionFrame)
     }
+
+    // MARK: 요소
+
+    /// 문서의 요소 목록에 맞춰 뷰를 더하고·빼고·고침 (순서 = 목록 순서, 뒤가 위)
+    func setElements(_ elements: [PageElement], image: (String) -> CGImage?) {
+        let ids = Set(elements.map(\.id))
+        for (id, view) in elementViews where !ids.contains(id) {
+            view.removeFromSuperview()
+            elementViews[id] = nil
+        }
+        for element in elements {
+            let picture = element.imageID.flatMap(image)
+            if let view = elementViews[element.id] {
+                if view.textView == nil { view.apply(element, image: picture) }
+                elementLayer.bringSubviewToFront(view)
+            } else {
+                let view = ElementView(element: element, image: picture)
+                elementLayer.addSubview(view)
+                elementViews[element.id] = view
+            }
+        }
+    }
+
+    func elementView(_ id: UUID) -> ElementView? { elementViews[id] }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
