@@ -149,7 +149,7 @@ struct ContentView: View {
         }
         if args.contains("-BNShowTheme") { showTheme = true }
         if args.contains("-BNShowSettings") { showSettings = true }
-        if args.contains("-BNInkDemo") {
+        if args.contains("-BNInkDemo") || args.contains("-BNCurlDemo") {
             do {
                 await openNote(try DemoDocument.make(), remember: false)
             } catch {

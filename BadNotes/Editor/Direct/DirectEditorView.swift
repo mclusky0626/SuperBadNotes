@@ -47,9 +47,11 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     /// 화이트보드: 지금 확대 배율을 다시 배치할 때도 지킴
     private var boardZoom: CGFloat = 1
     private var fitZoom: CGFloat = 1
-    private var turning = false
-    private let swipeNext = UISwipeGestureRecognizer()
-    private let swipePrev = UISwipeGestureRecognizer()
+    /// 지금 넘기는 중인 종이
+    private var flip: Flip?
+    private var turning: Bool { flip != nil }
+    /// 책처럼 넘기기: 옆으로 끌면 손가락을 따라 종이가 말림
+    private let curlPan = UIPanGestureRecognizer()
 
     private var laidOutWidth: CGFloat = 0
     private var didInitialScroll = false
@@ -140,14 +142,15 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         scrollView.addGestureRecognizer(elementPan)
         scrollView.panGestureRecognizer.require(toFail: elementPan)
 
-        // 책처럼 넘기기: 옆으로 쓸기
-        for (swipe, direction) in [(swipeNext, UISwipeGestureRecognizer.Direction.left), (swipePrev, .right)] {
-            swipe.direction = direction
-            swipe.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-            swipe.delegate = self
-            swipe.addTarget(self, action: #selector(handleSwipe(_:)))
-            scrollView.addGestureRecognizer(swipe)
-        }
+        // 책처럼 넘기기: 옆으로 끌기 (손가락을 따라 종이가 말림)
+        curlPan.allowedTouchTypes = fingers
+        curlPan.maximumNumberOfTouches = 2
+        curlPan.delegate = self
+        curlPan.addTarget(self, action: #selector(handleCurlPan(_:)))
+        scrollView.addGestureRecognizer(curlPan)
+        curlPan.require(toFail: elementPan)
+        scrollView.panGestureRecognizer.require(toFail: curlPan)
+        CurlResources.warmUp()
 
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)),
                                                name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
@@ -196,8 +199,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         inkGesture.allowedTouchTypes = types
         scrollView.panGestureRecognizer.minimumNumberOfTouches = on ? 2 : 1
         // 손가락 필기면 한 손가락은 필기라서 넘기기는 두 손가락으로
-        swipeNext.numberOfTouchesRequired = on ? 2 : 1
-        swipePrev.numberOfTouchesRequired = on ? 2 : 1
+        curlPan.minimumNumberOfTouches = on ? 2 : 1
     }
 
     /// 설정의 페이지 보기가 바뀌면 지금 페이지를 지키며 다시 배치
@@ -223,6 +225,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     }
 
     func prepareForRemoval() {
+        endFlip(complete: true)
         elements.endEditing()
         wetView.stop()
         bridge.detach(self)
@@ -236,6 +239,8 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         scrollView.frame = bounds
         wetView.frame = bounds
         guard bounds.width > 0, abs(bounds.width - laidOutWidth) > 0.5 else { return }
+        // 넘기는 중에 화면이 돌면 그 자리에서 다 넘김
+        endFlip(complete: true)
         let keepPage = didInitialScroll ? bridge.page : initialPage
         laidOutWidth = bounds.width
         currentRow = PageRows.row(containing: keepPage, in: PageRows.make(count: pageViews.count, twoUp: useTwoUp,
@@ -274,9 +279,20 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             row.reduce(0) { $0 + pageViews[$1].bounds.width } + spine * CGFloat(max(0, row.count - 1))
         }
         func height(_ row: [Int]) -> CGFloat { row.map { pageViews[$0].bounds.height }.max() ?? 0 }
+        let spread = useTwoUp
         func place(_ row: [Int], x startX: CGFloat, y: CGFloat) {
-            var x = startX
             let h = height(row)
+            if spread {
+                // 두 쪽: 책등을 가운데 두고 제자리에 (혼자인 쪽도 책처럼 왼쪽·오른쪽 자리)
+                let spineX = gap + maxWidth
+                for (index, right) in zip(row, PageRows.rightSlots(row, coverAlone: document.hasCover)) {
+                    let view = pageViews[index]
+                    let x = right ? spineX + spine : spineX - view.bounds.width
+                    view.frame.origin = CGPoint(x: x, y: y + (h - view.bounds.height) / 2)
+                }
+                return
+            }
+            var x = startX
             for index in row {
                 let view = pageViews[index]
                 view.frame.origin = CGPoint(x: x, y: y + (h - view.bounds.height) / 2)
@@ -288,14 +304,12 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         if bookMode, rows.indices.contains(currentRow) {
             let row = rows[currentRow]
             for view in pageViews { view.isHidden = !row.contains(view.index) }
-            // 두 쪽 화면에서 표지가 혼자면 책처럼 오른쪽에
-            let full = useTwoUp ? maxWidth * 2 + spine : width(row)
-            let offset = (useTwoUp && row == [0] && document.hasCover) ? maxWidth + spine : (full - width(row)) / 2
-            place(row, x: gap + offset, y: gap)
+            let full = spread ? maxWidth * 2 + spine : width(row)
+            place(row, x: gap + (full - width(row)) / 2, y: gap)
             natural = CGSize(width: full + gap * 2, height: height(row) + gap * 2)
         } else {
             for view in pageViews { view.isHidden = false }
-            let contentWidth = rows.map(width).max() ?? maxWidth
+            let contentWidth = spread ? maxWidth * 2 + spine : rows.map(width).max() ?? maxWidth
             var y = gap
             for row in rows {
                 place(row, x: gap + (contentWidth - width(row)) / 2, y: y)
@@ -385,6 +399,26 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     // MARK: 책처럼 넘기기
 
+    /// 넘기는 중인 종이 한 장
+    private struct Flip {
+        let fromRow: Int
+        let forward: Bool
+        let curl: PageCurlView
+        /// 다 넘길 때까지 그대로 덮어 두는 옛 페이지 사진
+        let covers: [UIView]
+        /// true: 펴진 종이가 넘어감 / false: 넘어가 있던 종이가 돌아옴 (한 쪽 보기에서 앞 페이지로)
+        let startsFlat: Bool
+        /// 손가락이 1pt 갈 때 종이 끝이 가는 양 (한 쪽 보기는 화면 폭보다 멀리 가야 해서 더 많이)
+        let gain: CGFloat
+
+        var flat: CGPoint { curl.geometry.rest(curl.grabY) }
+        var turned: CGPoint { curl.geometry.turned(curl.grabY) }
+        var start: CGPoint { startsFlat ? flat : turned }
+        var done: CGPoint { startsFlat ? turned : flat }
+        /// 0 = 시작 그대로, 1 = 다 넘김
+        var progress: CGFloat { startsFlat ? curl.state.turned : 1 - curl.state.turned }
+    }
+
     func turn(by delta: Int) {
         guard bookMode else {
             scroll(toPage: min(max(bridge.page + delta, 0), pageViews.count - 1), animated: true)
@@ -392,52 +426,187 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         }
         let target = currentRow + delta
         guard rows.indices.contains(target) else {
-            // 끝이면 살짝 튕기기 (모델 값은 안 바꾸는 덧셈 애니메이션)
-            let bounce = CAKeyframeAnimation(keyPath: "transform.translation.x")
-            let d: CGFloat = delta > 0 ? -22 : 22
-            bounce.values = [0, d, -d * 0.3, d * 0.1, 0]
-            bounce.keyTimes = [0, 0.25, 0.55, 0.8, 1]
-            bounce.duration = 0.45
-            bounce.isAdditive = true
-            scrollView.layer.add(bounce, forKey: "edge")
-            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            bounceAtEnd(delta)
             return
         }
         turn(toRow: target, animated: true)
     }
 
+    /// 끝이면 살짝 튕기기 (모델 값은 안 바꾸는 덧셈 애니메이션)
+    private func bounceAtEnd(_ delta: Int) {
+        guard scrollView.layer.animation(forKey: "edge") == nil else { return }
+        let bounce = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        let d: CGFloat = delta > 0 ? -22 : 22
+        bounce.values = [0, d, -d * 0.3, d * 0.1, 0]
+        bounce.keyTimes = [0, 0.25, 0.55, 0.8, 1]
+        bounce.duration = 0.45
+        bounce.isAdditive = true
+        scrollView.layer.add(bounce, forKey: "edge")
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+    }
+
     private func turn(toRow row: Int, animated: Bool) {
         guard rows.indices.contains(row), row != currentRow, !turning else { return }
+        guard animated else {
+            prepareTurn()
+            showRow(row)
+            return
+        }
+        guard let flip = beginFlip(toRow: row, grabY: nil) else { return }
+        self.flip = flip
+        UISelectionFeedbackGenerator().selectionChanged()
+        // 아래 모서리부터 들어 올려 비스듬히 말리며 넘어감
+        flip.curl.animate(to: flip.done, duration: 0.8, lift: flip.curl.geometry.rect.height * 0.22,
+                          easeInOut: true) { [weak self] in
+            self?.endFlip(complete: true)
+        }
+    }
+
+    private func prepareTurn() {
         clearSelection()
         elements.endEditing()
         elements.clearSelection()
-        let forward = row > currentRow
-        // 넘기기 전 보이던 페이지 사진
-        let old: [PageTurn.Sheet] = animated ? rows[currentRow].compactMap { index in
-            let view = pageViews[index]
-            guard let shot = view.snapshotView(afterScreenUpdates: false) else { return nil }
-            return PageTurn.Sheet(snapshot: shot, frame: view.convert(view.bounds, to: self))
-        } : []
+    }
+
+    private func showRow(_ row: Int) {
         currentRow = row
         layoutPages()
         updateCurrentPage()
-        guard animated, !old.isEmpty else { return }
-        turning = true
-        let newRow = rows[row]
-        UISelectionFeedbackGenerator().selectionChanged()
-        PageTurn.run(in: self, old: old, forward: forward, newBack: { [weak self] _ in
-            // 넘어가는 종이 뒷면 = 새로 펼친 반대쪽 페이지 (반쯤 넘겼을 때 찍음: 그때쯤 타일이 그려져 있음)
-            guard let self else { return nil }
-            let index = forward ? newRow.first : newRow.last
-            return index.flatMap { self.pageViews[$0].snapshotView(afterScreenUpdates: false) }
-        }, completion: { [weak self] in
-            self?.turning = false
-        })
     }
 
-    @objc private func handleSwipe(_ gesture: UISwipeGestureRecognizer) {
-        guard bookMode, !turning else { return }
-        turn(by: gesture === swipeNext ? 1 : -1)
+    /// 넘기기 준비: 옛 페이지를 찍어 두고 새 줄로 배치를 바꾼 다음, 그 위에 넘어가는 종이를 덮음.
+    /// 종이를 못 만들면(Metal 없음 등) 배치만 바꾸고 nil
+    private func beginFlip(toRow row: Int, grabY: CGFloat?) -> Flip? {
+        prepareTurn()
+        let forward = row > currentRow
+        let fromRow = currentRow
+        let oldRow = rows[currentRow], newRow = rows[row]
+        let displayScale = max(1, traitCollection.displayScale)
+        func frame(_ index: Int) -> CGRect { pageViews[index].convert(pageViews[index].bounds, to: self) }
+        func pixels(_ index: Int, width: CGFloat) -> CGFloat {
+            width / max(pageViews[index].bounds.width, 1) * displayScale
+        }
+        func slot(_ row: [Int], right: Bool) -> Int? {
+            zip(row, PageRows.rightSlots(row, coverAlone: document.hasCover)).first { $0.1 == right }?.0
+        }
+        func cover(_ index: Int) -> UIView? {
+            guard let shot = pageViews[index].snapshotView(afterScreenUpdates: false) else { return nil }
+            shot.frame = frame(index)
+            return shot
+        }
+
+        let geometry: CurlGeometry
+        let front: CGImage?
+        var back: CGImage?
+        let under: CGRect?
+        var covers: [UIView] = []
+        let startsFlat: Bool
+        if useTwoUp {
+            // 앞으로: 오른쪽 종이가 책등을 넘어 왼쪽에 / 뒤로: 왼쪽 종이가 오른쪽에. 뒷면 = 새 줄의 반대쪽 페이지
+            // 혼자인 쪽(표지, 홀수로 남은 마지막 쪽)의 빈 자리는 비워 둔 채 넘김
+            guard let leaf = slot(oldRow, right: forward) else {
+                showRow(row)
+                return nil
+            }
+            let rect = frame(leaf)
+            geometry = CurlGeometry(rect: rect, spineOnLeft: forward)
+            front = pageViews[leaf].image(pointScale: pixels(leaf, width: rect.width))
+            if let other = slot(oldRow, right: !forward), let shot = cover(other) { covers.append(shot) }
+            showRow(row)
+            back = slot(newRow, right: !forward).flatMap {
+                pageViews[$0].image(pointScale: pixels($0, width: rect.width))
+            }
+            under = slot(newRow, right: forward).map(frame)
+            startsFlat = true
+        } else if forward {
+            // 한 쪽 앞으로: 지금 페이지가 왼쪽으로 말려 나가고 밑에 새 페이지
+            let old = oldRow[0]
+            let rect = frame(old)
+            geometry = CurlGeometry(rect: rect, spineOnLeft: true)
+            front = pageViews[old].image(pointScale: pixels(old, width: rect.width))
+            showRow(row)
+            under = frame(newRow[0])
+            startsFlat = true
+        } else {
+            // 한 쪽 뒤로: 넘어가 있던 앞 페이지가 돌아와 지금 페이지를 덮음
+            let old = oldRow[0]
+            let oldRect = frame(old)
+            if let shot = cover(old) { covers.append(shot) }
+            showRow(row)
+            let page = newRow[0]
+            let rect = frame(page)
+            geometry = CurlGeometry(rect: rect, spineOnLeft: true)
+            front = pageViews[page].image(pointScale: pixels(page, width: rect.width))
+            under = oldRect
+            startsFlat = false
+        }
+
+        let rect = geometry.rect
+        let y = min(max(grabY ?? rect.minY + rect.height * 0.86, rect.minY), rect.maxY)
+        let start = startsFlat ? geometry.rest(y) : geometry.turned(y)
+        if front == nil { Log.warn("종이 넘기기: 앞면 사진 없음") }
+        guard let front,
+              let curl = PageCurlView(frame: bounds, geometry: geometry, grabY: y, finger: start, front: front, back: back)
+        else {
+            Log.warn("종이 넘기기 애니메이션을 못 만들어서 바로 넘김")
+            return nil
+        }
+        curl.underRect = under
+        curl.fadesWhenTurned = !useTwoUp
+        for shot in covers { insertSubview(shot, belowSubview: wetView) }
+        insertSubview(curl, belowSubview: wetView)
+        curl.setFinger(start)
+        return Flip(fromRow: fromRow, forward: forward, curl: curl, covers: covers, startsFlat: startsFlat,
+                    gain: useTwoUp ? 1 : 1.35)
+    }
+
+    /// complete: false면 처음 줄로 되돌림
+    private func endFlip(complete: Bool) {
+        guard let flip else { return }
+        self.flip = nil
+        flip.curl.stop()
+        if !complete { showRow(flip.fromRow) }
+        flip.curl.removeFromSuperview()
+        for shot in flip.covers { shot.removeFromSuperview() }
+    }
+
+    @objc private func handleCurlPan(_ gesture: UIPanGestureRecognizer) {
+        let t = gesture.translation(in: self)
+        switch gesture.state {
+        case .began:
+            guard !turning else { return }
+            let vx = gesture.velocity(in: self).x
+            let forward = (vx != 0 ? vx : t.x) < 0
+            let target = currentRow + (forward ? 1 : -1)
+            guard rows.indices.contains(target) else { return }
+            let touch = gesture.location(in: self)
+            flip = beginFlip(toRow: target, grabY: touch.y - t.y)
+            if flip != nil { UISelectionFeedbackGenerator().selectionChanged() }
+            follow(t)
+        case .changed:
+            follow(t)
+        case .ended, .cancelled, .failed:
+            guard let flip, !flip.curl.isAnimating else { return }
+            // 넘기는 쪽으로 빠르게 쳤거나, 3분의 1쯤 넘겼으면 끝까지. 아니면 제자리로
+            let v = gesture.velocity(in: self).x * (flip.forward ? -1 : 1)
+            let complete = gesture.state == .ended && (v > 350 || (flip.progress > 0.32 && v > -250))
+            let target = complete ? flip.done : flip.start
+            let finger = flip.curl.finger
+            let remaining = hypot(target.x - finger.x, target.y - finger.y) / max(1, flip.curl.geometry.width * 2)
+            let speed = min(1, 600 / max(abs(v), 600))
+            if complete { UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.6) }
+            flip.curl.animate(to: target, duration: 0.14 + 0.36 * remaining * speed) { [weak self] in
+                self?.endFlip(complete: complete)
+            }
+        default:
+            break
+        }
+    }
+
+    private func follow(_ translation: CGPoint) {
+        guard let flip, !flip.curl.isAnimating else { return }
+        let s = flip.start
+        flip.curl.setFinger(CGPoint(x: s.x + translation.x * flip.gain, y: s.y + translation.y))
     }
 
     /// 실행 취소한 페이지가 화면 밖이면 그 페이지로
@@ -942,18 +1111,24 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        if gestureRecognizer === swipeNext || gestureRecognizer === swipePrev {
-            return other === scrollView.panGestureRecognizer
-        }
+        if gestureRecognizer === curlPan || other === curlPan { return false }
         return gestureRecognizer === inkGesture
             && (other === scrollView.pinchGestureRecognizer || other === scrollView.panGestureRecognizer)
     }
 
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        if gestureRecognizer === swipeNext || gestureRecognizer === swipePrev {
-            // 확대해서 보는 중에는 옆으로 밀면 스크롤
-            return bookMode && !turning && !elements.isEditing && !elements.isDragging
-                && scrollView.zoomScale <= fitZoom * 1.05
+        if gestureRecognizer === curlPan {
+            // 확대해서 보는 중에는 옆으로 밀면 스크롤. 옆으로 끌 때만 넘기기 (위아래는 그냥 둠)
+            guard bookMode, !turning, !elements.isEditing, !elements.isDragging,
+                  scrollView.zoomScale <= fitZoom * 1.05 else { return false }
+            let v = curlPan.velocity(in: self)
+            guard abs(v.x) > abs(v.y) * 1.1 else { return false }
+            let delta = v.x < 0 ? 1 : -1
+            guard rows.indices.contains(currentRow + delta) else {
+                bounceAtEnd(delta)
+                return false
+            }
+            return true
         }
         return super.gestureRecognizerShouldBegin(gestureRecognizer)
     }
@@ -1160,6 +1335,23 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     #if DEBUG
     /// -BNInkDemo 로 켜면 터치 대신 같은 처리 경로로 펜·형광펜·지우개·실행 취소·올가미·확대를 차례로 해 봄
     private func runDemoIfRequested() {
+        if ProcessInfo.processInfo.arguments.contains("-BNCurlDemo") {
+            // 넘기는 종이를 중간에 세워 두고 화면을 찍을 시간을 줌 (앞으로 → 끝까지 → 뒤로)
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                for row in [currentRow + 1, currentRow] where rows.indices.contains(row) && row != currentRow {
+                    guard let flip = beginFlip(toRow: row, grabY: nil) else { return }
+                    self.flip = flip
+                    let a = flip.start, b = flip.done
+                    flip.curl.setFinger(CGPoint(x: a.x + (b.x - a.x) * 0.42, y: a.y - flip.curl.geometry.rect.height * 0.2))
+                    print("[DEMO] 넘기는 중 \(row)")
+                    try? await Task.sleep(for: .seconds(6))
+                    flip.curl.animate(to: flip.done, duration: 0.5) { [weak self] in self?.endFlip(complete: true) }
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+            return
+        }
         guard ProcessInfo.processInfo.arguments.contains("-BNInkDemo"), let page = pageViews.first else { return }
         Task { @MainActor in
             let w = page.bounds.width, h = page.bounds.height

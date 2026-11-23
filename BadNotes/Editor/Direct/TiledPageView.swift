@@ -118,6 +118,12 @@ nonisolated final class InkTileRenderer: TileRenderer, @unchecked Sendable {
     }
 
     func drawTile(in context: CGContext) {
+        draw(in: context, record: true)
+    }
+
+    /// record: 타일에 그렸다고 적어 둘지 (화면 밖에서 한 장 그릴 때는 안 적음)
+    /// glass: 유리펜 획도 흉내로 그림 (화면에서는 진짜 유리 층이 따로 그려서 타일에는 안 그림)
+    func draw(in context: CGContext, record: Bool, glass: Bool = false) {
         let clip = context.boundingBoxOfClipPath
         let snapshot = ink.renderSnapshot()
         let scale = max(0.05, abs(context.ctm.a))
@@ -143,12 +149,12 @@ nonisolated final class InkTileRenderer: TileRenderer, @unchecked Sendable {
             } else {
                 flushApple()
                 // 유리펜 획은 진짜 Liquid Glass 층이 그림 (타일에는 안 그림)
-                if stroke.glassStrength == nil { InkRenderer.draw(stroke, in: context, smooth: true) }
+                if glass || stroke.glassStrength == nil { InkRenderer.draw(stroke, in: context, smooth: true) }
             }
             if snapshot.pending.contains(stroke.key) { drawnPending.append(stroke.key) }
         }
         flushApple()
-        if !drawnPending.isEmpty {
+        if record, !drawnPending.isEmpty {
             ink.recordDrawn(clip, keys: drawnPending)
         }
     }
@@ -161,6 +167,8 @@ final class PageView: UIView {
     let ink: PageInk
     private let pdfTiles: TiledView
     private let inkTiles: TiledView
+    private let backgroundRenderer: any TileRenderer
+    private let inkRenderer: InkTileRenderer
     private let elementLayer = UIView()
     private(set) var elementViews: [UUID: ElementView] = [:]
     let selectionFrame = SelectionFrameView()
@@ -178,8 +186,11 @@ final class PageView: UIView {
         let rect = CGRect(origin: .zero, size: size)
         let background: any TileRenderer = board ? BoardTileRenderer()
             : PDFPageTileRenderer(page: page, size: size, documentLock: documentLock)
+        let inkRenderer = InkTileRenderer(ink: ink)
+        backgroundRenderer = background
+        self.inkRenderer = inkRenderer
         pdfTiles = TiledView(frame: rect, renderer: background)
-        inkTiles = TiledView(frame: rect, renderer: InkTileRenderer(ink: ink))
+        inkTiles = TiledView(frame: rect, renderer: inkRenderer)
         super.init(frame: rect)
         backgroundColor = .white
         layer.shadowColor = UIColor.black.cgColor
@@ -198,6 +209,62 @@ final class PageView: UIView {
             updateGlassInk()
         }
         addSubview(selectionFrame)
+    }
+
+    // MARK: 사진
+
+    /// 페이지 한 장을 사진으로 (넘기는 종이용). 항상 직접 그림:
+    /// 화면 찍기(drawHierarchy)와 layer.render는 Liquid Glass(유리 메모지·유리 글자·유리펜)를 검게 찍어서,
+    /// 유리는 PDF 내보내기와 같은 흉내 그림으로 대신함
+    /// - pointScale: 페이지 1pt당 픽셀 수
+    func image(pointScale: CGFloat) -> CGImage? {
+        let longest = max(bounds.width, bounds.height)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = min(pointScale, 4096 / max(longest, 1))
+        format.opaque = false
+        format.preferredRange = .standard
+        let elements = elementLayer.subviews.compactMap { $0 as? ElementView }
+        let drawn = UIGraphicsImageRenderer(size: bounds.size, format: format).image { context in
+            let cg = context.cgContext
+            cg.setFillColor(UIColor.white.cgColor)
+            cg.fill(bounds)
+            backgroundRenderer.drawTile(in: cg)
+            for view in elements {
+                let e = view.element
+                cg.saveGState()
+                ElementRenderer.drawBackground(e, in: cg, rect: e.frame, live: false)
+                ElementRenderer.drawContent(e, image: view.picture, in: cg, rect: e.frame, forPDF: true)
+                cg.restoreGState()
+            }
+            if showsInk { inkRenderer.draw(in: cg, record: false, glass: true) }
+        }.cgImage
+        if let drawn, Self.looksBlank(drawn) {
+            // 어두운 종이면 정상. 아니면 다음에 원인을 찾을 수 있게 남김
+            Log.warn("페이지 \(index + 1) 넘기기 사진이 어둡게 그려짐 (\(drawn.width)×\(drawn.height))")
+        }
+        return drawn
+    }
+
+    /// 거의 다 까맣거나 투명한 사진인지 (16×16으로 줄여서 봄). 종이는 대부분 밝음
+    nonisolated static func looksBlank(_ image: CGImage) -> Bool {
+        let n = 16
+        var pixels = [UInt8](repeating: 0, count: n * n * 4)
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return false }
+        let drawn = pixels.withUnsafeMutableBytes { raw -> Bool in
+            guard let context = CGContext(data: raw.baseAddress, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4,
+                                          space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: n, height: n))
+            return true
+        }
+        guard drawn else { return true }
+        var bright = 0
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            let luma = (Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2])) / 3
+            if pixels[i + 3] > 200, luma > 60 { bright += 1 }
+        }
+        return bright < n * n / 4
     }
 
     // MARK: 요소

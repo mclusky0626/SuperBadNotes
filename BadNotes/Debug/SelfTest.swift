@@ -57,6 +57,8 @@ nonisolated enum SelfTest {
             try elementTests(root: root, results)
             try coverTests(root: root, results)
             await maskMatchesPencilKit(results)
+            pageCurlTests(results)
+            await glassPageImageTest(results)
         } catch {
             results.check("예외 없이 끝남", false, "\(error)")
         }
@@ -861,6 +863,192 @@ nonisolated enum SelfTest {
     }
 
     // MARK: 표지
+
+    // MARK: 책처럼 넘기기
+
+    private static func pageCurlTests(_ r: Results) {
+        // 두 쪽 배치: 표지는 오른쪽, 홀수로 남은 마지막 쪽은 왼쪽 자리
+        let withCover = PageRows.make(count: 4, twoUp: true, coverAlone: true)   // [0] [1,2] [3]
+        r.check("두 쪽 줄 (표지 + 홀수 끝)", withCover == [[0], [1, 2], [3]], "\(withCover)")
+        r.check("표지는 오른쪽 자리", PageRows.rightSlots([0], coverAlone: true) == [true])
+        r.check("홀수로 남은 마지막 쪽은 왼쪽 자리", PageRows.rightSlots([3], coverAlone: true) == [false]
+                && PageRows.rightSlots([4], coverAlone: false) == [false])
+        r.check("두 쪽 줄은 왼쪽·오른쪽", PageRows.rightSlots([1, 2], coverAlone: true) == [false, true])
+
+        // 말림 계산: 화면 좌표 그대로 셰이더와 같은 식으로 잡은 점이 손가락에 오는지
+        func project(_ p: CGPoint, _ st: CurlGeometry.State) -> CGPoint {
+            let n = st.normal, c = st.point, rad = st.radius
+            let dist = (p.x - c.x) * n.dx + (p.y - c.y) * n.dy
+            guard !st.flat, dist > 0 else { return p }
+            let back = CGPoint(x: p.x - n.dx * dist, y: p.y - n.dy * dist)
+            if dist < .pi * rad {
+                let off = rad * sin(dist / rad)
+                return CGPoint(x: back.x + n.dx * off, y: back.y + n.dy * off)
+            }
+            let off = dist - .pi * rad
+            return CGPoint(x: back.x - n.dx * off, y: back.y - n.dy * off)
+        }
+        for spineOnLeft in [true, false] {
+            let side = spineOnLeft ? "오른쪽 종이" : "왼쪽 종이"
+            let g = CurlGeometry(rect: CGRect(x: 500, y: 40, width: 400, height: 560), spineOnLeft: spineOnLeft)
+            let y: CGFloat = 520
+            let rest = g.state(finger: g.rest(y), grabY: y)
+            r.check("\(side): 안 넘기면 납작", rest.flat && rest.turned == 0, "\(rest)")
+            let done = g.state(finger: g.turned(y), grabY: y)
+            r.check("\(side): 다 넘기면 책등에서 반지름 0으로 접힘",
+                    !done.flat && done.radius < 0.01 && abs(done.point.x - g.spineX) < 0.01 && abs(done.turned - 1) < 0.001,
+                    "\(done)")
+            let mirrored = project(CGPoint(x: g.freeX, y: 100), done)
+            r.check("\(side): 다 넘긴 종이는 반대쪽 자리에 거울처럼",
+                    abs(mirrored.x - (2 * g.spineX - g.freeX)) < 0.5 && abs(mirrored.y - 100) < 0.5, "\(mirrored)")
+            let towardSpine: CGFloat = spineOnLeft ? -1 : 1
+            var followOK = true
+            for travel in stride(from: CGFloat(40), through: 760, by: 60) {
+                let finger = CGPoint(x: g.freeX + towardSpine * travel, y: y - travel * 0.15)
+                let clamped = g.clamp(finger, grabY: y)
+                let st = g.state(finger: finger, grabY: y)
+                let p = project(g.rest(y), st)
+                if hypot(p.x - clamped.x, p.y - clamped.y) > 1 { followOK = false }
+            }
+            r.check("\(side): 잡은 점이 손가락을 따라감", followOK)
+            let far = g.clamp(CGPoint(x: g.spineX + towardSpine * 3000, y: y - 2000), grabY: y)
+            r.check("\(side): 책등에서 종이 폭보다 멀리 안 감",
+                    abs(hypot(far.x - g.spineX, far.y - y) - g.width) < 0.01)
+            let backward = g.state(finger: CGPoint(x: g.freeX - towardSpine * 50, y: y), grabY: y)
+            r.check("\(side): 반대로 끌면 안 말림", backward.flat)
+        }
+        r.check("종이 넘기기 셰이더 컴파일", CurlResources.shared != nil)
+        curlRenderSweep(r)
+        // 화면 찍기가 비었을 때(투명·검정) 알아채는지
+        let blank = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).image { _ in }.cgImage
+        let paper = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).image { c in
+            UIColor.white.setFill(); c.fill(CGRect(x: 0, y: 0, width: 40, height: 40))
+        }.cgImage
+        // XDR 화면(아이패드 프로)처럼 16비트 확장 범위 사진도 텍스처에서 하얗게 나오는지
+        if let res = CurlResources.shared, let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB),
+           let wide = CGContext(data: nil, width: 32, height: 32, bitsPerComponent: 16, bytesPerRow: 0, space: space,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.floatComponents.rawValue
+                                    | CGBitmapInfo.byteOrder16Little.rawValue) {
+            wide.setFillColor(CGColor(colorSpace: space, components: [1, 1, 1, 1])!)
+            wide.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+            if let image = wide.makeImage(), let texture = res.texture(image) {
+                var px = [UInt8](repeating: 0, count: 4)
+                texture.getBytes(&px, bytesPerRow: 128, from: MTLRegionMake2D(16, 16, 1, 1), mipmapLevel: 0)
+                r.check("16비트 확장 범위 사진도 하얀 텍스처", px[0] > 240 && px[1] > 240 && px[2] > 240 && px[3] > 240, "\(px)")
+            } else {
+                r.check("16비트 확장 범위 사진도 하얀 텍스처", false, "텍스처 못 만듦")
+            }
+        }
+        r.check("빈 페이지 사진을 알아챔", blank.map(PageView.looksBlank) == true && paper.map(PageView.looksBlank) == false)
+    }
+
+    /// 유리 메모지·유리 글자·유리펜이 가득한 페이지도 넘기기 사진이 검게 나오지 않는지
+    private static func glassPageImageTest(_ r: Results) async {
+        let blank = await MainActor.run { () -> Bool? in
+            let size = CGSize(width: 600, height: 800)
+            let pdfPage = PDFPage()
+            pdfPage.setBounds(CGRect(origin: .zero, size: size), for: .mediaBox)
+            var big = PageElement(kind: .sticky, x: 20, y: 20, width: 560, height: 700)
+            big.text = "She"
+            big.fill = .glass
+            var glyph = PageElement(kind: .text, x: 60, y: 300, width: 400, height: 120)
+            glyph.text = "What"
+            glyph.fontSize = 80
+            glyph.glassText = true
+            var stroke = line(.pen, .black, CGPoint(x: 40, y: 760), CGPoint(x: 560, y: 760), width: 8)
+            stroke.randomSeed = GlassInk.seed(strength: 0.5)
+            let view = PageView(index: 0, page: pdfPage, size: size, ink: PageInk(drawing: PKDrawing(strokes: [stroke])),
+                                documentLock: ReadWriteLock())
+            view.setElements([big, glyph], image: { _ in nil })
+            view.updateGlassInk()
+            return view.image(pointScale: 2).map(PageView.looksBlank)
+        }
+        r.check("유리 가득한 페이지도 넘기기 사진이 하얗게", blank == false, "\(String(describing: blank))")
+    }
+
+    /// 말린 종이를 화면 밖에 여러 손가락 자리로 그려 보고 검은 점(NaN·빈 텍스처)이 없는지
+    private static func curlRenderSweep(_ r: Results) {
+        guard let res = CurlResources.shared else { return }
+        let size = CGSize(width: 640, height: 420)
+        func solid(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat) -> MTLTexture? {
+            let image = UIGraphicsImageRenderer(size: CGSize(width: 200, height: 280)).image { c in
+                UIColor(red: red, green: green, blue: blue, alpha: 1).setFill()
+                c.fill(CGRect(x: 0, y: 0, width: 200, height: 280))
+            }
+            return image.cgImage.flatMap(res.texture)
+        }
+        guard let front = solid(0.95, 0.94, 0.90), let back = solid(0.85, 0.92, 0.98) else {
+            r.check("넘기기 텍스처 만들기", false)
+            return
+        }
+        let colorD = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: Int(size.width),
+                                                              height: Int(size.height), mipmapped: false)
+        colorD.usage = [.renderTarget, .shaderRead]
+        colorD.storageMode = .shared
+        let depthD = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: CurlResources.depthFormat, width: Int(size.width),
+                                                              height: Int(size.height), mipmapped: false)
+        depthD.usage = .renderTarget
+        depthD.storageMode = .private
+        guard let color = res.device.makeTexture(descriptor: colorD), let depth = res.device.makeTexture(descriptor: depthD)
+        else { r.check("넘기기 그릴 판 만들기", false); return }
+
+        var worst = (black: 0, total: 0, case: "")
+        var frames = 0
+        for spineOnLeft in [true, false] {
+            let rect = spineOnLeft ? CGRect(x: 322, y: 30, width: 260, height: 360) : CGRect(x: 58, y: 30, width: 260, height: 360)
+            let g = CurlGeometry(rect: rect, spineOnLeft: spineOnLeft)
+            let toward: CGFloat = spineOnLeft ? -1 : 1
+            for grab in [rect.minY + 2, rect.maxY - 2] {
+                // 아주 조금 끈 것부터 거의 다 넘긴 것까지, 위아래로도 흔들어서
+                for travel in [0.6, 1.5, 3, 8, 30, 130, 260, 420, 505, 518, 520] as [CGFloat] {
+                    for dy in [-120, 0, 120] as [CGFloat] {
+                        for withBack in [true, false] {
+                            let finger = CGPoint(x: g.freeX + toward * travel, y: grab + dy)
+                            let st = g.state(finger: finger, grabY: grab)
+                            let pass = MTLRenderPassDescriptor()
+                            pass.colorAttachments[0].texture = color
+                            pass.colorAttachments[0].loadAction = .clear
+                            pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+                            pass.colorAttachments[0].storeAction = .store
+                            pass.depthAttachment.texture = depth
+                            pass.depthAttachment.clearDepth = 1
+                            pass.stencilAttachment.texture = depth
+                            pass.stencilAttachment.clearStencil = 0
+                            guard let buffer = res.queue.makeCommandBuffer(),
+                                  let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { continue }
+                            res.encode(CurlResources.Frame(viewSize: size, leafRect: rect, underRect: rect, state: st,
+                                                           pageWidth: rect.width, front: front, back: withBack ? back : nil),
+                                       into: encoder)
+                            encoder.endEncoding()
+                            buffer.commit()
+                            buffer.waitUntilCompleted()
+                            frames += 1
+                            var pixels = [UInt8](repeating: 0, count: Int(size.width * size.height) * 4)
+                            color.getBytes(&pixels, bytesPerRow: Int(size.width) * 4,
+                                           from: MTLRegionMake2D(0, 0, Int(size.width), Int(size.height)), mipmapLevel: 0)
+                            var black = 0, opaque = 0
+                            pixels.withUnsafeBufferPointer { p in
+                                var i = 0
+                                while i < p.count {
+                                    if p[i + 3] > 240 {
+                                        opaque += 1
+                                        if p[i] < 90 && p[i + 1] < 90 && p[i + 2] < 90 { black += 1 }
+                                    }
+                                    i += 8
+                                }
+                            }
+                            if black > worst.black {
+                                worst = (black, opaque, "책등 \(spineOnLeft ? "왼쪽" : "오른쪽") 잡은 y \(Int(grab - rect.minY)) "
+                                         + "끈 거리 \(travel) dy \(dy) 뒷면 \(withBack) R \(st.radius)")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        r.check("넘기는 종이에 검은 점 없음 (\(frames)장)", worst.black == 0,
+                "검은 점 \(worst.black)/\(worst.total): \(worst.case)")
+    }
 
     private static func coverTests(root: URL, _ r: Results) throws {
         var blank = 0

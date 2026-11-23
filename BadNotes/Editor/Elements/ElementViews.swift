@@ -31,6 +31,8 @@ nonisolated final class ElementTileRenderer: TileRenderer, @unchecked Sendable {
 final class ElementView: UIView {
     private(set) var element: PageElement
     private var image: CGImage?
+    /// 사진 요소의 사진 (페이지를 화면 밖에서 그릴 때 씀)
+    var picture: CGImage? { image }
     private var glass: UIVisualEffectView?
     /// 유리 글자: 글자 모양으로 오려 낸 진짜 유리
     private var glyphGlass: GlassShapeHost?

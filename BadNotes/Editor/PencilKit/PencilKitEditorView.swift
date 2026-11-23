@@ -197,19 +197,22 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
         let gap = max(12, maxWidth * 0.025)
         let spine: CGFloat = 2
         // 가로 화면이면 두 쪽씩 양옆으로 (표지는 혼자)
-        let rows = PageRows.make(count: pageViews.count, twoUp: twoUp && bounds.width > bounds.height,
-                                 coverAlone: document.hasCover)
+        let spread = twoUp && bounds.width > bounds.height
+        let rows = PageRows.make(count: pageViews.count, twoUp: spread, coverAlone: document.hasCover)
         func width(_ row: [Int]) -> CGFloat {
             row.reduce(0) { $0 + pageViews[$1].bounds.width } + spine * CGFloat(max(0, row.count - 1))
         }
-        let contentWidth = rows.map(width).max() ?? maxWidth
+        let contentWidth = spread ? maxWidth * 2 + spine : rows.map(width).max() ?? maxWidth
         var y = gap
         var origins = Array(repeating: CGPoint.zero, count: pageViews.count)
         for row in rows {
             var x = gap + (contentWidth - width(row)) / 2
             let h = row.map { pageViews[$0].bounds.height }.max() ?? 0
-            for index in row {
+            // 두 쪽: 책등을 가운데 두고 제자리에 (표지는 오른쪽, 홀수로 남은 마지막 쪽은 왼쪽)
+            let rightSlots = PageRows.rightSlots(row, coverAlone: document.hasCover)
+            for (index, right) in zip(row, rightSlots) {
                 let view = pageViews[index]
+                if spread { x = right ? gap + maxWidth + spine : gap + maxWidth - view.bounds.width }
                 origins[index] = CGPoint(x: x, y: y + (h - view.bounds.height) / 2)
                 view.frame.origin = origins[index]
                 x += view.bounds.width + spine
