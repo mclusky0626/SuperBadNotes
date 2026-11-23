@@ -66,6 +66,51 @@ nonisolated struct PageElement: Codable, Hashable, Identifiable, Sendable {
     var fillColor = RGBAColor(hex: 0xFFE07A)
     /// 사진이면 문서 안 사진 번호 (내용 해시)
     var imageID: String?
+    /// 글꼴 (`TextFonts`의 번호)
+    var font = "system"
+    /// 유리: 맑게(뒤가 더 비침) / 뿌옇게
+    var glassClear = false
+    /// 유리에 입히는 색의 진하기 (0 = 색 없음). 색은 fillColor
+    var glassTint: Double = 0
+
+    init(kind: Kind, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) {
+        self.kind = kind
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        if kind == .sticky {
+            glassClear = true
+            glassTint = 0.3
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, x, y, width, height, text, fontSize, bold, textColor, alignment, fill, fillColor, imageID
+        case font, glassClear, glassTint
+    }
+
+    /// 예전(1.2) 파일에는 글꼴·유리 값이 없어서 없으면 기본값
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        kind = try c.decode(Kind.self, forKey: .kind)
+        x = try c.decode(CGFloat.self, forKey: .x)
+        y = try c.decode(CGFloat.self, forKey: .y)
+        width = try c.decode(CGFloat.self, forKey: .width)
+        height = try c.decode(CGFloat.self, forKey: .height)
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        fontSize = try c.decodeIfPresent(CGFloat.self, forKey: .fontSize) ?? 20
+        bold = try c.decodeIfPresent(Bool.self, forKey: .bold) ?? false
+        textColor = try c.decodeIfPresent(RGBAColor.self, forKey: .textColor) ?? RGBAColor(hex: 0x1C1C1E)
+        alignment = try c.decodeIfPresent(Int.self, forKey: .alignment) ?? 0
+        fill = try c.decodeIfPresent(Fill.self, forKey: .fill) ?? .none
+        fillColor = try c.decodeIfPresent(RGBAColor.self, forKey: .fillColor) ?? RGBAColor(hex: 0xFFE07A)
+        imageID = try c.decodeIfPresent(String.self, forKey: .imageID)
+        font = try c.decodeIfPresent(String.self, forKey: .font) ?? "system"
+        glassClear = try c.decodeIfPresent(Bool.self, forKey: .glassClear) ?? (kind == .sticky)
+        glassTint = try c.decodeIfPresent(Double.self, forKey: .glassTint) ?? (kind == .sticky ? 0.3 : 0)
+    }
 
     var frame: CGRect {
         get { CGRect(x: x, y: y, width: width, height: height) }
@@ -114,7 +159,7 @@ nonisolated struct PageElement: Codable, Hashable, Identifiable, Sendable {
 
 nonisolated enum ElementRenderer {
     static func font(_ e: PageElement) -> UIFont {
-        UIFont.systemFont(ofSize: e.fontSize, weight: e.bold ? .bold : .regular)
+        TextFonts.font(e.font, size: e.fontSize, bold: e.bold)
     }
 
     static func paragraph(_ e: PageElement) -> NSParagraphStyle {
@@ -150,15 +195,14 @@ nonisolated enum ElementRenderer {
             context.fillPath()
         case (.sticky, _), (.text, .glass):
             guard !live else { return }
-            // 다른 앱용 유리 흉내: 반투명 판 + 밝은 테두리
-            let tint = e.kind == .sticky ? e.fillColor : RGBAColor(hex: 0xFFFFFF)
-            let base = UIColor(red: 1, green: 1, blue: 1, alpha: 0.55).cgColor
+            // 다른 앱용 유리 흉내: 반투명 판(맑으면 더 투명) + 색 + 밝은 테두리
+            let base = UIColor(red: 1, green: 1, blue: 1, alpha: e.glassClear ? 0.25 : 0.55).cgColor
             context.addPath(path)
             context.setFillColor(base)
             context.fillPath()
-            if tint.a > 0.01, e.kind == .sticky {
+            if e.fillColor.a > 0.01, e.glassTint > 0.01 {
                 context.addPath(path)
-                context.setFillColor(tint.uiColor.withAlphaComponent(0.32).cgColor)
+                context.setFillColor(e.fillColor.uiColor.withAlphaComponent(min(0.9, e.glassTint)).cgColor)
                 context.fillPath()
             }
             context.addPath(UIBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
@@ -355,5 +399,55 @@ nonisolated final class ElementAnnotation: PDFAnnotation {
             ElementRenderer.drawContent(element, image: element.imageID.flatMap { images[$0] }, in: context, rect: element.frame)
         }
         context.restoreGState()
+    }
+}
+
+// MARK: - 글꼴
+
+/// 텍스트 상자 글꼴. 기본 글꼴 모양 4가지 + 기기에 있는 글꼴 (없는 글꼴은 목록에서 뺌)
+nonisolated enum TextFonts {
+    struct Option: Identifiable, Hashable, Sendable {
+        let id: String
+        let title: String
+    }
+
+    static let builtIn: [Option] = [
+        Option(id: "system", title: "기본"), Option(id: "rounded", title: "둥근"),
+        Option(id: "serif", title: "명조"), Option(id: "mono", title: "고정폭"),
+    ]
+
+    private static let named: [Option] = [
+        Option(id: "NanumPen", title: "나눔손글씨 펜"), Option(id: "NanumBrush", title: "나눔손글씨 붓"),
+        Option(id: "NanumMyeongjo", title: "나눔명조"), Option(id: "NanumGothic", title: "나눔고딕"),
+        Option(id: "AppleMyungjo", title: "애플 명조"), Option(id: "Noteworthy-Light", title: "Noteworthy"),
+        Option(id: "ChalkboardSE-Regular", title: "Chalkboard"), Option(id: "AmericanTypewriter", title: "타자기"),
+        Option(id: "Georgia", title: "Georgia"), Option(id: "Avenir-Book", title: "Avenir"),
+        Option(id: "SnellRoundhand", title: "필기체"),
+    ]
+
+    static let available: [Option] = builtIn + named.filter { UIFont(name: $0.id, size: 12) != nil }
+
+    static func title(_ id: String) -> String {
+        available.first { $0.id == id }?.title ?? "기본"
+    }
+
+    static func font(_ id: String, size: CGFloat, bold: Bool) -> UIFont {
+        let system = UIFont.systemFont(ofSize: size, weight: bold ? .bold : .regular)
+        let design: UIFontDescriptor.SystemDesign?
+        switch id {
+        case "system": return system
+        case "rounded": design = .rounded
+        case "serif": design = .serif
+        case "mono": design = .monospaced
+        default: design = nil
+        }
+        if let design, let descriptor = system.fontDescriptor.withDesign(design) {
+            return UIFont(descriptor: descriptor, size: size)
+        }
+        guard let named = UIFont(name: id, size: size) else { return system }
+        if bold, let descriptor = named.fontDescriptor.withSymbolicTraits(.traitBold) {
+            return UIFont(descriptor: descriptor, size: size)
+        }
+        return named
     }
 }

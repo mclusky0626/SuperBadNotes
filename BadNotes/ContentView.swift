@@ -26,20 +26,25 @@ struct ContentView: View {
                              onSettings: { showSettings = true },
                              onLog: { showLog = true })
                     .id(ObjectIdentifier(note))
-                    .transition(.opacity)
+                    // 노트를 펼치면 살짝 커지며 나타나고, 닫으면 서재가 뒤에서 다가옴
+                    .transition(.asymmetric(insertion: .scale(scale: 0.94).combined(with: .opacity),
+                                            removal: .scale(scale: 1.03).combined(with: .opacity)))
             } else {
                 LibraryView(onOpen: { url in Task { await openNote(url) } },
                             onTheme: { showTheme = true },
                             onSettings: { showSettings = true })
-                    .transition(.opacity)
+                    .transition(.asymmetric(insertion: .scale(scale: 1.04).combined(with: .opacity),
+                                            removal: .scale(scale: 0.97).combined(with: .opacity)))
             }
             if isOpening {
                 ProgressView("여는 중…")
                     .padding(24)
                     .glassEffect(themes.glass, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .transition(.scale(scale: 0.85).combined(with: .opacity))
             }
         }
-        .animation(.smooth(duration: 0.3), value: note == nil)
+        .animation(.spring(response: 0.45, dampingFraction: 0.86), value: note == nil)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isOpening)
         .overlay(alignment: .bottom) {
             errorBanner
                 .padding(.horizontal, 16)

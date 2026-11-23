@@ -96,10 +96,12 @@ struct LibraryFolderView: View {
                       alignment: .center, spacing: 30) {
                 ForEach(items) { item in
                     card(for: item)
+                        .transition(.scale(scale: 0.85).combined(with: .opacity))
                 }
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 20)
+            .animation(.spring(response: 0.42, dampingFraction: 0.84), value: items)
         }
         .navigationTitle(title)
         .containerBackground(.clear, for: .navigation)
@@ -174,6 +176,7 @@ struct LibraryFolderView: View {
                 .buttonStyle(.plain)
         } else {
             content
+                .hoverEffect(.lift)
                 .onTapGesture { onOpen(item.url) }
         }
     }

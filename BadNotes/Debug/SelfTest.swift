@@ -645,6 +645,34 @@ nonisolated enum SelfTest {
         _ = try PDFInkWriter.apply(content: [0: PageContent(drawing: nil, elements: [])], images: [:], to: url)
         r.check("요소: 다 지우면 PDF에서도 없어짐", try NoteLoader.load(url).elements[0] == nil)
 
+        // 1.2에서 저장한 요소(글꼴·유리 값 없음)도 읽힘
+        let old12 = """
+        [{"id":"\(UUID().uuidString)","kind":"sticky","x":10,"y":20,"width":200,"height":200,"text":"옛 메모",
+          "fontSize":22,"bold":false,"textColor":{"r":0,"g":0,"b":0,"a":1},"alignment":0,"fill":"none",
+          "fillColor":{"r":1,"g":0.8,"b":0.3,"a":1}}]
+        """
+        let decodedOld = try? JSONDecoder().decode([PageElement].self, from: Data(old12.utf8))
+        r.check("요소: 1.2 파일도 읽음 (글꼴 기본, 메모지는 맑은 유리)",
+                decodedOld?.first?.font == "system" && decodedOld?.first?.glassClear == true
+                    && abs((decodedOld?.first?.glassTint ?? 0) - 0.3) < 0.001, "\(String(describing: decodedOld))")
+        var styled = glass
+        styled.font = "rounded"
+        styled.glassClear = true
+        styled.glassTint = 0.5
+        let roundTrip = try JSONDecoder().decode([PageElement].self, from: JSONEncoder().encode([styled]))
+        r.check("요소: 글꼴·유리 투명도도 저장됨", roundTrip == [styled])
+        r.check("글꼴: 기본 모양 4가지는 늘 있음, 모르는 글꼴은 기본으로",
+                TextFonts.available.count >= 4
+                    && TextFonts.font("없는글꼴", size: 20, bold: false).pointSize == 20
+                    && TextFonts.font("rounded", size: 20, bold: true).fontDescriptor.symbolicTraits.contains(.traitBold))
+
+        // 페이지 줄 (가로 두 쪽)
+        r.check("두 쪽: 표지는 혼자, 나머지는 둘씩",
+                PageRows.make(count: 5, twoUp: true, coverAlone: true) == [[0], [1, 2], [3, 4]]
+                    && PageRows.make(count: 5, twoUp: true, coverAlone: false) == [[0, 1], [2, 3], [4]]
+                    && PageRows.make(count: 3, twoUp: false, coverAlone: true) == [[0], [1], [2]]
+                    && PageRows.row(containing: 3, in: [[0], [1, 2], [3, 4]]) == 2)
+
         // 복구 기록
         let journal = DrawingJournal(directory: root.appendingPathComponent("ElementJournal", isDirectory: true))
         try journal.write(elements, images: [prepared.id: prepared.data], page: 2)

@@ -62,7 +62,7 @@ struct EditorScreen: View {
                              onClose: onClose, onAddPage: addPage,
                              onPickPhoto: { showPhotos = true }, onPickFile: { showImageFiles = true },
                              onTheme: onTheme, onSettings: onSettings, onLog: onLog)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(.move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.96, anchor: .top)))
             }
         }
         .overlay(alignment: .bottom) {
@@ -78,7 +78,9 @@ struct EditorScreen: View {
                         .transition(.scale.combined(with: .opacity))
                     }
                     StatusCapsule(title: note.title, page: bridge.page, pageCount: bridge.pageCount,
-                                  saveState: note.saveState) {
+                                  saveState: note.saveState, isBook: bridge.isBook,
+                                  canBack: bridge.canTurnBack, canForward: bridge.canTurnForward,
+                                  onTurn: { bridge.turn($0) }) {
                         guard bridge.pageCount > 0 else { return }
                         jumpText = ""
                         showJump = true
@@ -86,11 +88,12 @@ struct EditorScreen: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 8)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .transition(.move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.96, anchor: .bottom)))
             }
         }
-        .animation(.smooth(duration: 0.28), value: bridge.chromeHidden)
-        .animation(.smooth(duration: 0.25), value: bridge.atLastPage)
+        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: bridge.chromeHidden)
+        .animation(.spring(response: 0.35, dampingFraction: 0.75), value: bridge.atLastPage)
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: bridge.isBook)
         .onChange(of: bridge.page) { _, page in ReadingPosition.set(page, for: note.url) }
         .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .images)
         .onChange(of: photoItem) { _, item in
@@ -146,10 +149,11 @@ struct EditorScreen: View {
         switch settings.editMode {
         case .direct:
             DirectEditor(document: note, bridge: bridge, initialPage: initialPage, tool: tools.tool,
-                         fingerDrawing: settings.fingerDrawing, tapToUndo: settings.tapToUndo, insets: insets)
+                         fingerDrawing: settings.fingerDrawing, tapToUndo: settings.tapToUndo,
+                         pageTurn: settings.pageTurn, twoUp: settings.twoUpLandscape, insets: insets)
         case .pencilKit:
             PencilKitEditor(document: note, bridge: bridge, initialPage: initialPage,
-                            fingerDrawing: settings.fingerDrawing, insets: insets)
+                            fingerDrawing: settings.fingerDrawing, twoUp: settings.twoUpLandscape, insets: insets)
         }
     }
 

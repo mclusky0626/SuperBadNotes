@@ -95,9 +95,9 @@ final class ElementView: UIView {
 
         if element.usesGlass {
             // 메모지: 맑은 유리에 색을 살짝 → 종이 줄이 비쳐 보이는 유리판. 텍스트 상자: 뿌연 유리
-            let effect = UIGlassEffect(style: element.kind == .sticky ? .clear : .regular)
-            if element.kind == .sticky, element.fillColor.a > 0.01 {
-                effect.tintColor = element.fillColor.uiColor.withAlphaComponent(0.3)
+            let effect = UIGlassEffect(style: element.glassClear ? .clear : .regular)
+            if element.fillColor.a > 0.01, element.glassTint > 0.01 {
+                effect.tintColor = element.fillColor.uiColor.withAlphaComponent(min(0.9, element.glassTint))
             }
             let view = glass ?? UIVisualEffectView(effect: effect)
             view.effect = effect
@@ -215,6 +215,11 @@ final class SelectionFrameView: UIView {
             isHidden = true
             target = .null
             return
+        }
+        if isHidden {
+            // 고를 때 테두리가 부드럽게 나타남
+            alpha = 0
+            UIView.animate(withDuration: 0.18) { self.alpha = 1 }
         }
         isHidden = false
         target = rect

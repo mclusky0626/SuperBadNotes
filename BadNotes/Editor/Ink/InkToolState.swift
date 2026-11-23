@@ -126,6 +126,7 @@ final class InkToolState {
     /// 텍스트 도구로 새로 만드는 상자의 바탕과 글자 크기
     var textFill: PageElement.Fill = .none { didSet { save() } }
     var textSize: CGFloat = 20 { didSet { save() } }
+    var textFont = "system" { didSet { save() } }
 
     var tool: Tool = .pen {
         didSet {
@@ -278,6 +279,7 @@ final class InkToolState {
         var eraserHighlighterOnly: Bool?
         var textFill: PageElement.Fill?
         var textSize: CGFloat?
+        var textFont: String?
     }
 
     private static let key = "inkTools"
@@ -299,6 +301,7 @@ final class InkToolState {
         eraserHighlighterOnly = s.eraserHighlighterOnly ?? false
         textFill = s.textFill ?? .none
         textSize = s.textSize ?? 20
+        textFont = s.textFont ?? "system"
         penWidthIndex = min(max(0, s.penWidthIndex), penWidths.count - 1)
         if s.highlighterColors.count == 3 { highlighterColors = s.highlighterColors }
         highlighterColorIndex = min(max(0, s.highlighterColorIndex), 2)
@@ -315,7 +318,8 @@ final class InkToolState {
                        highlighterColors: highlighterColors, highlighterColorIndex: highlighterColorIndex,
                        highlighterWidthIndex: highlighterWidthIndex, eraserSizeIndex: eraserSizeIndex,
                        penWidths: penWidths, highlighterWidths: highlighterWidths, eraserSizes: eraserSizes,
-                       eraserHighlighterOnly: eraserHighlighterOnly, textFill: textFill, textSize: textSize)
+                       eraserHighlighterOnly: eraserHighlighterOnly, textFill: textFill, textSize: textSize,
+                       textFont: textFont)
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.key)
         }

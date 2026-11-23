@@ -26,7 +26,7 @@ struct SettingsView: View {
                                     .font(.title3)
                                     .foregroundStyle(settings.editMode == mode ? Color.accentColor : Color.secondary)
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(mode == .direct ? "\(mode.title) (기본)" : mode.title)
+                                    Text(mode.title)
                                         .font(.body.weight(.semibold))
                                         .foregroundStyle(.primary)
                                     Text(mode.detail)
@@ -50,6 +50,15 @@ struct SettingsView: View {
                     Text("입력")
                 } footer: {
                     Text("손가락으로 쓰기를 켜면 스크롤과 확대는 두 손가락으로 해요. 세 손가락 탭은 다시 실행이에요. 형광펜 곧게 긋기를 켜면 거의 곧은 형광펜 줄을 곧게 펴 주고, 수평에 가까우면 수평으로 맞춰요. Apple Pencil 두 번 탭은 시스템 설정을 따라 지우개로 바꿔요.")
+                }
+
+                Section {
+                    Toggle("책처럼 넘기기", isOn: $settings.pageTurn)
+                    Toggle("가로 화면에서 두 쪽 펼치기", isOn: $settings.twoUpLandscape)
+                } header: {
+                    Text("페이지 보기")
+                } footer: {
+                    Text("책처럼 넘기기를 켜면 한 장씩 보이고, 옆으로 쓸거나 아래 ‹ › 를 누르면 종이를 넘기듯 넘어가요. 끄면 세로로 이어서 스크롤해요. 가로 화면에서는 두 쪽이 양옆으로 펼쳐져요. (책처럼 넘기기는 BadNotes 필기 도구에서만)")
                 }
 
                 Section("모양") {

@@ -22,12 +22,13 @@ struct EditorChrome: View {
     let onTheme: () -> Void
     let onSettings: () -> Void
     let onLog: () -> Void
+    @State private var settings = AppSettings.shared
 
-    /// 직접 필기 모드에서만 BadNotes 도구 막대 (Apple 도구 모드는 Apple 도구 팔레트가 뜸)
+    /// BadNotes 도구 모드에서만 BadNotes 도구 막대 (Apple 도구 모드는 Apple 도구 팔레트가 뜸)
     private var showsInkTools: Bool { mode == .direct }
 
     var body: some View {
-        // 폭이 모자라면(세로 화면, 분할 화면) 색·굵기를 줄인 막대로
+        // 폭이 모자라면(분할 화면 등) 색·굵기를 하나로 접은 막대로
         ViewThatFits(in: .horizontal) {
             row(compact: false)
             row(compact: true)
@@ -52,15 +53,18 @@ struct EditorChrome: View {
             Spacer(minLength: 0)
             if showsInkTools {
                 ToolPalette(tools: tools, compact: compact)
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
             Spacer(minLength: 0)
 
             GlassEffectContainer(spacing: 8) {
                 HStack(spacing: 8) {
-                    GlassIconButton(systemImage: "paintpalette", label: "테마", size: 40, action: onTheme)
-                    GlassIconButton(systemImage: "gearshape", label: "설정", size: 40, action: onSettings)
-                    GlassIconButton(systemImage: unreadErrors > 0 ? "exclamationmark.triangle.fill" : "ladybug",
-                                    label: "로그", tint: unreadErrors > 0 ? .red : nil, size: 40, action: onLog)
+                    if unreadErrors > 0 {
+                        GlassIconButton(systemImage: "exclamationmark.triangle.fill", label: "로그", tint: .red, size: 40,
+                                        action: onLog)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                    moreMenu
                 }
             }
         }
@@ -81,125 +85,199 @@ struct EditorChrome: View {
             }
             Button("페이지 추가", systemImage: "doc.badge.plus", action: onAddPage)
         } label: {
-            Image(systemName: "plus")
-                .font(.system(size: 40 * 0.4, weight: .semibold))
-                .foregroundStyle(Color.primary)
-                .frame(width: 40, height: 40)
-                .contentShape(Circle())
+            glassCircle("plus")
         }
         .menuIndicator(.hidden)
         .glassEffect(themes.glass.interactive(), in: .circle)
         .accessibilityLabel("넣기")
     }
+
+    /// [⋯] 보기·테마·설정·로그를 한 곳에 (도구 막대 자리를 넓힘)
+    private var moreMenu: some View {
+        Menu {
+            Section("페이지 보기") {
+                Toggle(isOn: $settings.pageTurn) { Label("책처럼 넘기기", systemImage: "book.pages") }
+                    .disabled(mode != .direct)
+                Toggle(isOn: $settings.twoUpLandscape) { Label("가로 화면에서 두 쪽", systemImage: "rectangle.split.2x1") }
+            }
+            Button("테마", systemImage: "paintpalette", action: onTheme)
+            Button("설정", systemImage: "gearshape", action: onSettings)
+            Button("로그", systemImage: "ladybug", action: onLog)
+        } label: {
+            glassCircle("ellipsis")
+        }
+        .menuIndicator(.hidden)
+        .glassEffect(themes.glass.interactive(), in: .circle)
+        .accessibilityLabel("더 보기")
+    }
+
+    private func glassCircle(_ systemImage: String) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(Color.primary)
+            .frame(width: 40, height: 40)
+            .contentShape(Circle())
+    }
 }
 
-/// 펜·형광펜·지우개·올가미·텍스트 + 그 도구의 옵션 (색·굵기 / 지우개 방식·크기 / 글상자 바탕).
-/// 고른 도구를 한 번 더 누르면 자세한 설정, 고른 굵기 점을 한 번 더 누르면 굵기 슬라이더
+/// 펜·형광펜·지우개·올가미·텍스트 + 그 도구의 옵션.
+/// - 고른 도구를 한 번 더 누르면 자세한 설정 (도구 밑 점이 '설정 있음' 표시)
+/// - 고른 색을 한 번 더 누르면 색 고르기, 고른 굵기를 한 번 더 누르면 굵기 슬라이더
 struct ToolPalette: View {
     @Environment(ThemeStore.self) private var themes
     @Bindable var tools: InkToolState
     var compact = false
     @State private var settings = AppSettings.shared
+    @Namespace private var selection
 
     @State private var showPenOptions = false
     @State private var showHighlighterOptions = false
     @State private var showEraserOptions = false
     @State private var sizeEditor: Int?
+    @State private var colorEditor: Int?
     @State private var showCompactSizes = false
+
+    private let spring = Animation.spring(response: 0.32, dampingFraction: 0.78)
 
     var body: some View {
         HStack(spacing: 2) {
-            toolButton(.pen, systemImage: tools.penStyle.icon, options: $showPenOptions) { PenOptions(tools: tools) }
-            toolButton(.highlighter, systemImage: InkToolState.Tool.highlighter.icon, options: $showHighlighterOptions) {
-                HighlighterOptions(tools: tools, settings: settings)
+            HStack(spacing: 0) {
+                toolButton(.pen, systemImage: tools.penStyle.icon, options: $showPenOptions) { PenOptions(tools: tools) }
+                toolButton(.highlighter, systemImage: InkToolState.Tool.highlighter.icon, options: $showHighlighterOptions) {
+                    HighlighterOptions(tools: tools, settings: settings)
+                }
+                toolButton(.eraser, systemImage: tools.eraserMode.icon, options: $showEraserOptions) { EraserOptions(tools: tools) }
+                toolButton(.lasso, systemImage: InkToolState.Tool.lasso.icon, options: nil) { EmptyView() }
+                toolButton(.text, systemImage: InkToolState.Tool.text.icon, options: nil) { EmptyView() }
             }
-            toolButton(.eraser, systemImage: tools.eraserMode.icon, options: $showEraserOptions) { EraserOptions(tools: tools) }
-            toolButton(.lasso, systemImage: InkToolState.Tool.lasso.icon, options: nil) { EmptyView() }
-            toolButton(.text, systemImage: InkToolState.Tool.text.icon, options: nil) { EmptyView() }
 
             separator
 
-            switch tools.tool {
-            case .eraser: eraserBar
-            case .text: textBar
-            default: inkBar
+            Group {
+                switch tools.tool {
+                case .eraser: eraserBar
+                case .text: textBar
+                default: inkBar
+                }
             }
+            .id(contextID)
+            .transition(.asymmetric(insertion: .scale(scale: 0.85, anchor: .leading).combined(with: .opacity),
+                                    removal: .opacity))
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
         .glassEffect(themes.glass, in: .capsule)
-        .animation(.smooth(duration: 0.2), value: tools.tool)
+        .animation(spring, value: tools.tool)
+        .animation(spring, value: tools.inkTool)
+    }
+
+    /// 옵션 막대가 바뀌는 단위 (펜↔형광펜도 색이 달라서 새로 그림)
+    private var contextID: String {
+        switch tools.tool {
+        case .eraser, .text: tools.tool.rawValue
+        default: "ink-\(tools.inkTool.rawValue)"
+        }
     }
 
     // MARK: 도구 버튼
 
     private func toolButton<Options: View>(_ tool: InkToolState.Tool, systemImage: String, options: Binding<Bool>?,
                                            @ViewBuilder content: @escaping () -> Options) -> some View {
-        Button {
-            if tools.tool == tool, let options {
+        let selected = tools.tool == tool
+        return Button {
+            if selected, let options {
                 options.wrappedValue = true
             } else {
-                tools.tool = tool
+                withAnimation(spring) { tools.tool = tool }
             }
         } label: {
-            toolIcon(tool, systemImage: systemImage)
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                .symbolEffect(.bounce, value: selected)
+                .frame(width: 40, height: 38)
+                .background {
+                    if selected {
+                        Capsule()
+                            .fill(themes.accent.gradient)
+                            .shadow(color: themes.accent.opacity(0.35), radius: 6, y: 2)
+                            .matchedGeometryEffect(id: "tool", in: selection)
+                    }
+                }
+                .overlay(alignment: .bottom) {
+                    // 한 번 더 누르면 설정이 있다는 표시
+                    if selected, options != nil {
+                        Capsule().fill(Color.white.opacity(0.9)).frame(width: 10, height: 3).offset(y: -3)
+                    }
+                }
+                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScaleStyle())
         .popover(isPresented: options ?? .constant(false), arrowEdge: .top) {
             content()
                 .padding(18)
                 .frame(width: 300)
                 .presentationCompactAdaptation(.popover)
         }
+        .accessibilityLabel(tool.title)
         .accessibilityHint(options == nil ? "" : "한 번 더 누르면 설정")
-    }
-
-    private func toolIcon(_ tool: InkToolState.Tool, systemImage: String) -> some View {
-        let selected = tools.tool == tool
-        return Image(systemName: systemImage)
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(selected ? Color.white : Color.primary)
-            .frame(width: 38, height: 38)
-            .background {
-                if selected { Circle().fill(themes.accent) }
-            }
-            .contentShape(Circle())
-            .accessibilityLabel(tool.title)
     }
 
     // MARK: 펜·형광펜: 색 + 굵기
 
     @ViewBuilder
     private var inkBar: some View {
-        if !compact {
-            ForEach(Array(tools.paletteColors.enumerated()), id: \.offset) { index, color in
-                Button { tools.selectColor(index) } label: {
-                    swatch(color, selected: index == tools.paletteColorIndex && tools.tool == tools.inkTool)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("색 \(index + 1)")
+        if compact {
+            swatchButton(tools.paletteColorIndex)
+        } else {
+            ForEach(0..<tools.paletteColors.count, id: \.self) { index in
+                swatchButton(index)
             }
         }
-        colorPicker
         separator
         sizeDots
     }
 
-    private var colorPicker: some View {
-        ColorPicker("색 고르기", selection: Binding(
-            get: { tools.currentColor.color },
-            set: { tools.setCurrentSlotColor(RGBAColor($0)) }
-        ), supportsOpacity: false)
-        .labelsHidden()
-        .frame(width: 32, height: 32)
+    /// 색 칸. 고른 칸을 한 번 더 누르면 색 고르기
+    private func swatchButton(_ index: Int) -> some View {
+        let colors = tools.paletteColors
+        let color = colors.indices.contains(index) ? colors[index] : RGBAColor(hex: 0)
+        let selected = index == tools.paletteColorIndex && tools.tool == tools.inkTool
+        return Button {
+            if selected || compact { colorEditor = index } else { withAnimation(spring) { tools.selectColor(index) } }
+        } label: {
+            Circle()
+                .fill(color.color)
+                .frame(width: 22, height: 22)
+                .overlay { Circle().strokeBorder(Color.primary.opacity(0.15), lineWidth: 1) }
+                .padding(4)
+                .overlay {
+                    if selected {
+                        Circle().strokeBorder(themes.accent, lineWidth: 2.5)
+                            .transition(.scale(scale: 1.3).combined(with: .opacity))
+                    }
+                }
+                .frame(width: 32, height: 34)
+                .contentShape(Circle())
+        }
+        .buttonStyle(PressScaleStyle())
+        .popover(isPresented: Binding(get: { colorEditor == index }, set: { if !$0 { colorEditor = nil } }),
+                 arrowEdge: .top) {
+            ColorPalette(tools: tools, index: index)
+                .padding(18)
+                .frame(width: 320)
+                .presentationCompactAdaptation(.popover)
+        }
+        .accessibilityLabel("색 \(index + 1)")
+        .accessibilityHint("한 번 더 누르면 색 고르기")
     }
 
-    /// 굵기 점 3개. 고른 점을 한 번 더 누르면 슬라이더
+    /// 굵기 점 3개 (실제 굵기 비율대로). 고른 점을 한 번 더 누르면 슬라이더
     @ViewBuilder
     private var sizeDots: some View {
         if compact {
             Button { showCompactSizes = true } label: { sizeDot(tools.sizeIndex, selected: true) }
-                .buttonStyle(.plain)
+                .buttonStyle(PressScaleStyle())
                 .popover(isPresented: $showCompactSizes, arrowEdge: .top) {
                     VStack(alignment: .leading, spacing: 14) {
                         Picker("굵기", selection: Binding(get: { tools.sizeIndex }, set: { tools.selectSize($0) })) {
@@ -218,11 +296,11 @@ struct ToolPalette: View {
         } else {
             ForEach(Array(tools.sizeOptions.enumerated()), id: \.offset) { index, _ in
                 Button {
-                    if index == tools.sizeIndex { sizeEditor = index } else { tools.selectSize(index) }
+                    if index == tools.sizeIndex { sizeEditor = index } else { withAnimation(spring) { tools.selectSize(index) } }
                 } label: {
                     sizeDot(index, selected: index == tools.sizeIndex)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressScaleStyle())
                 .popover(isPresented: Binding(get: { sizeEditor == index }, set: { if !$0 { sizeEditor = nil } }),
                          arrowEdge: .top) {
                     SizeEditor(tools: tools, index: index)
@@ -234,6 +312,26 @@ struct ToolPalette: View {
                 .accessibilityHint("한 번 더 누르면 굵기 조절")
             }
         }
+    }
+
+    /// 굵기 점: 칸 값에 맞춰 크기가 변함 (가장 가는 칸 6pt ~ 가장 굵은 칸 18pt)
+    private func sizeDot(_ index: Int, selected: Bool) -> some View {
+        let options = tools.sizeOptions
+        let value = options[min(max(index, 0), options.count - 1)]
+        let range = tools.sizeRange
+        let t = sqrt(max(0, min(1, (value - range.lowerBound) / (range.upperBound - range.lowerBound))))
+        let diameter = 5 + 14 * t
+        return ZStack {
+            if selected {
+                Circle().fill(themes.accent.opacity(0.15)).frame(width: 28, height: 28)
+                    .transition(.scale.combined(with: .opacity))
+            }
+            Circle()
+                .fill(selected ? AnyShapeStyle(themes.accent) : AnyShapeStyle(Color.primary.opacity(0.55)))
+                .frame(width: diameter, height: diameter)
+        }
+        .frame(width: 30, height: 38)
+        .contentShape(Rectangle())
     }
 
     // MARK: 지우개: 부분/획 + 크기 + 형광펜만
@@ -255,7 +353,7 @@ struct ToolPalette: View {
         .accessibilityLabel("형광펜만 지우기")
     }
 
-    // MARK: 텍스트: 바탕 + 글자 색
+    // MARK: 텍스트: 바탕 + 글꼴 + 크기 + 글자 색
 
     @ViewBuilder
     private var textBar: some View {
@@ -266,6 +364,21 @@ struct ToolPalette: View {
             .accessibilityLabel(fill.title)
         }
         separator
+        Menu {
+            Picker("글꼴", selection: $tools.textFont) {
+                ForEach(TextFonts.available) { option in
+                    Text(option.title).font(Font(TextFonts.font(option.id, size: 17, bold: false))).tag(option.id)
+                }
+            }
+        } label: {
+            Text("가A")
+                .font(Font(TextFonts.font(tools.textFont, size: 16, bold: false)))
+                .foregroundStyle(Color.primary)
+                .frame(minWidth: 40, minHeight: 34)
+                .contentShape(Rectangle())
+        }
+        .menuIndicator(.hidden)
+        .accessibilityLabel("글꼴: \(TextFonts.title(tools.textFont))")
         Menu {
             Picker("글자 크기", selection: $tools.textSize) {
                 ForEach([14, 18, 20, 24, 28, 36, 48] as [CGFloat], id: \.self) { size in
@@ -281,12 +394,31 @@ struct ToolPalette: View {
         }
         .menuIndicator(.hidden)
         .accessibilityLabel("글자 크기")
+        if !compact {
+            separator
+            // 글자 색 = 펜 색 칸
+            ForEach(0..<tools.penColors.count, id: \.self) { index in
+                Button { withAnimation(spring) { tools.penColorIndex = index } } label: {
+                    Circle().fill(tools.penColors[index].color).frame(width: 18, height: 18)
+                        .overlay { Circle().strokeBorder(Color.primary.opacity(0.15)) }
+                        .padding(5)
+                        .overlay {
+                            if index == tools.penColorIndex { Circle().strokeBorder(themes.accent, lineWidth: 2) }
+                        }
+                        .frame(width: 30, height: 34)
+                }
+                .buttonStyle(PressScaleStyle())
+                .accessibilityLabel("글자 색 \(index + 1)")
+            }
+        }
     }
 
     // MARK: 부품
 
     private func chip(_ title: String?, systemImage: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        Button {
+            withAnimation(spring) { action() }
+        } label: {
             HStack(spacing: 4) {
                 Image(systemName: systemImage)
                     .font(.system(size: 13, weight: .semibold))
@@ -298,38 +430,12 @@ struct ToolPalette: View {
             .padding(.horizontal, title == nil ? 9 : 11)
             .frame(height: 32)
             .background {
-                Capsule().fill(selected ? AnyShapeStyle(themes.accent) : AnyShapeStyle(Color.primary.opacity(0.07)))
+                Capsule().fill(selected ? AnyShapeStyle(themes.accent.gradient) : AnyShapeStyle(Color.primary.opacity(0.07)))
             }
             .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScaleStyle())
         .padding(.horizontal, 1)
-    }
-
-    private func swatch(_ color: RGBAColor, selected: Bool) -> some View {
-        Circle()
-            .fill(color.color)
-            .frame(width: 22, height: 22)
-            .overlay { Circle().strokeBorder(Color.primary.opacity(0.15), lineWidth: 1) }
-            .padding(4)
-            .overlay {
-                if selected { Circle().strokeBorder(themes.accent, lineWidth: 2.5) }
-            }
-            .frame(width: 30, height: 30)
-            .contentShape(Circle())
-    }
-
-    /// 굵기 점: 실제 굵기 순서대로 크게
-    private func sizeDot(_ index: Int, selected: Bool) -> some View {
-        let options = tools.sizeOptions
-        let sorted = options.sorted()
-        let rank = sorted.firstIndex(of: options[min(index, options.count - 1)]) ?? index
-        let diameter: CGFloat = [7, 11, 16][min(rank, 2)]
-        return Circle()
-            .fill(selected ? themes.accent : Color.primary.opacity(0.5))
-            .frame(width: diameter, height: diameter)
-            .frame(width: 26, height: 38)
-            .contentShape(Rectangle())
     }
 
     private var separator: some View {
@@ -337,6 +443,81 @@ struct ToolPalette: View {
             .fill(Color.primary.opacity(0.15))
             .frame(width: 1, height: 22)
             .padding(.horizontal, 4)
+    }
+}
+
+/// 누르는 동안 살짝 작아지는 버튼
+struct PressScaleStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.88 : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.6), value: configuration.isPressed)
+    }
+}
+
+/// 색 칸 하나의 색 고르기: 자주 쓰는 색 + 직접 고르기
+struct ColorPalette: View {
+    @Environment(ThemeStore.self) private var themes
+    @Bindable var tools: InkToolState
+    let index: Int
+
+    private static let pen: [UInt32] = [
+        0x1C1C1E, 0x5E5E63, 0x9A9AA0, 0x0A2A66, 0x1F5FD6, 0x32ADE6, 0x30B0C7, 0x2E7D32,
+        0x34C759, 0xA2845E, 0xFFCC00, 0xFF9500, 0xD93025, 0xFF2D55, 0xAF52DE, 0x6E3FC3,
+    ]
+    private static let highlighter: [UInt32] = [
+        0xFFD60A, 0xFFE57A, 0x7CE07C, 0xA8F0C6, 0x64D2FF, 0xA9DEFF, 0xFF8AC6, 0xFFB3D9,
+        0xBF5AF2, 0xD7B4FF, 0xFF9F0A, 0xFFC680,
+    ]
+
+    private var isHighlighter: Bool { tools.inkTool == .highlighter }
+    private var current: RGBAColor {
+        let colors = tools.paletteColors
+        return colors.indices.contains(index) ? colors[index] : RGBAColor(hex: 0)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text(isHighlighter ? "형광펜 색" : "펜 색").font(.headline)
+                Spacer()
+                Text("칸 \(index + 1)").font(.footnote).foregroundStyle(.secondary)
+            }
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(30), spacing: 8), count: 8), spacing: 8) {
+                ForEach(isHighlighter ? Self.highlighter : Self.pen, id: \.self) { hex in
+                    let color = RGBAColor(hex: hex)
+                    Button { apply(color) } label: {
+                        Circle().fill(color.color).frame(width: 26, height: 26)
+                            .overlay { Circle().strokeBorder(Color.primary.opacity(0.15)) }
+                            .overlay {
+                                if same(color, current) { Circle().strokeBorder(themes.accent, lineWidth: 2.5).padding(-3) }
+                            }
+                    }
+                    .buttonStyle(PressScaleStyle())
+                }
+            }
+            Divider()
+            ColorPicker("직접 고르기", selection: Binding(get: { current.color }, set: { apply(RGBAColor($0)) }),
+                        supportsOpacity: false)
+                .font(.subheadline)
+        }
+    }
+
+    private func apply(_ color: RGBAColor) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            if isHighlighter {
+                tools.highlighterColors[index] = color
+                tools.highlighterColorIndex = index
+            } else {
+                tools.penColors[index] = color
+                tools.penColorIndex = index
+            }
+            if tools.tool != tools.inkTool { tools.tool = tools.inkTool }
+        }
+    }
+
+    private func same(_ a: RGBAColor, _ b: RGBAColor) -> Bool {
+        abs(a.r - b.r) + abs(a.g - b.g) + abs(a.b - b.b) < 0.02
     }
 }
 
@@ -489,39 +670,71 @@ struct EraserOptions: View {
     }
 }
 
-/// 아래 가운데: 제목 · 쪽수 · 저장 상태
+/// 아래 가운데: 제목 · 쪽수 · 저장 상태 (누르면 페이지 이동). 책 보기면 양옆에 ‹ ›
 struct StatusCapsule: View {
     @Environment(ThemeStore.self) private var themes
     let title: String
     let page: Int
     let pageCount: Int
     let saveState: NoteDocument.SaveState
+    var isBook = false
+    var canBack = false
+    var canForward = false
+    var onTurn: (Int) -> Void = { _ in }
     let onTap: () -> Void
 
     var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 12) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                if pageCount > 0 {
-                    Text("\(page + 1) / \(pageCount)쪽")
-                        .font(.subheadline)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
+        GlassEffectContainer(spacing: 10) {
+            HStack(spacing: 10) {
+                if isBook {
+                    turnButton(-1, "chevron.backward", enabled: canBack)
+                        .transition(.scale.combined(with: .opacity))
                 }
-                SaveStatusLabel(state: saveState)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Button(action: onTap) {
+                    HStack(spacing: 12) {
+                        Text(title)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                        if pageCount > 0 {
+                            Text("\(page + 1) / \(pageCount)쪽")
+                                .font(.subheadline)
+                                .monospacedDigit()
+                                .contentTransition(.numericText(value: Double(page)))
+                                .foregroundStyle(.secondary)
+                        }
+                        SaveStatusLabel(state: saveState)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 11)
+                    .frame(maxWidth: 560)
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(PressScaleStyle())
+                .glassEffect(themes.glass.interactive(), in: .capsule)
+                .accessibilityHint("눌러서 페이지 이동")
+                if isBook {
+                    turnButton(1, "chevron.forward", enabled: canForward)
+                        .transition(.scale.combined(with: .opacity))
+                }
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 11)
-            .frame(maxWidth: 560)
-            .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
-        .glassEffect(themes.glass.interactive(), in: .capsule)
-        .accessibilityHint("눌러서 페이지 이동")
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: page)
+        .animation(.easeInOut(duration: 0.2), value: saveState)
+    }
+
+    private func turnButton(_ delta: Int, _ systemImage: String, enabled: Bool) -> some View {
+        Button { onTurn(delta) } label: {
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .buttonStyle(PressScaleStyle())
+        .foregroundStyle(enabled ? Color.primary : Color.secondary.opacity(0.5))
+        .glassEffect(themes.glass.interactive(), in: .circle)
+        .accessibilityLabel(delta > 0 ? "다음 쪽" : "앞 쪽")
     }
 }
 

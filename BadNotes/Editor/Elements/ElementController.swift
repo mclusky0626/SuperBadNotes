@@ -98,9 +98,9 @@ final class ElementController: NSObject, UITextViewDelegate {
 
     // MARK: 화면
 
-    func refresh(_ pageView: PageView) {
+    func refresh(_ pageView: PageView, animated: Bool = false) {
         guard let document = host?.elementDocument else { return }
-        pageView.setElements(document.elements(for: pageView.index)) { document.image(for: $0) }
+        pageView.setElements(document.elements(for: pageView.index), image: { document.image(for: $0) }, animated: animated)
     }
 
     func updateSelectionFrame() {
@@ -155,6 +155,7 @@ final class ElementController: NSObject, UITextViewDelegate {
         var element = PageElement(kind: .text, x: 0, y: 0, width: min(340, pageSize.width * 0.6), height: 40)
         element.fill = fill
         element.fontSize = tools?.textSize ?? 20
+        element.font = tools?.textFont ?? "system"
         // 글자 색 = 지금 고른 펜 색 (색 바탕이면 바탕에 맞춰 검정)
         if fill == .color {
             element.fillColor = PageElement.fillColors[0].1
@@ -173,6 +174,7 @@ final class ElementController: NSObject, UITextViewDelegate {
         let side = min(240, pageSize.width * 0.42)
         var element = PageElement(kind: .sticky, x: 0, y: 0, width: side, height: side)
         element.fontSize = 22
+        element.font = tools?.textFont ?? "system"
         element.fillColor = PageElement.stickyColors[0].1
         element.height = ElementRenderer.fittedHeight(element)
         element.x = min(max(4, center.x - side / 2), max(4, pageSize.width - side - 4))
@@ -403,11 +405,43 @@ final class ElementController: NSObject, UITextViewDelegate {
         if element.kind == .sticky {
             items.append(colorMenu(title: "메모지 색", colors: PageElement.stickyColors, current: element.fillColor) { e, color in
                 e.fillColor = color
+                if e.glassTint < 0.01 { e.glassTint = 0.3 }
             })
+        }
+        if element.usesGlass {
+            var glass: [UIMenuElement] = [
+                UIMenu(options: .displayInline, children: [
+                    UIAction(title: "뿌옇게", image: UIImage(systemName: "cloud.fog"), state: element.glassClear ? .off : .on) { [weak self] _ in
+                        self?.change("유리") { $0.glassClear = false }
+                    },
+                    UIAction(title: "맑게 (뒤가 비침)", image: UIImage(systemName: "drop"), state: element.glassClear ? .on : .off) { [weak self] _ in
+                        self?.change("유리") { $0.glassClear = true }
+                    },
+                ]),
+                UIMenu(title: "색 진하기", image: UIImage(systemName: "circle.lefthalf.filled"), children:
+                    [("없음", 0.0), ("약하게", 0.15), ("보통", 0.3), ("진하게", 0.5), ("아주 진하게", 0.75)].map { name, value in
+                        UIAction(title: name, state: abs(element.glassTint - value) < 0.01 ? .on : .off) { [weak self] _ in
+                            self?.change("유리 색 진하기") { $0.glassTint = value }
+                        }
+                    }),
+            ]
+            if element.kind == .text {
+                glass.append(colorMenu(title: "유리 색", colors: PageElement.stickyColors, current: element.fillColor) { e, color in
+                    e.fillColor = color
+                    if e.glassTint < 0.01 { e.glassTint = 0.3 }
+                })
+            }
+            items.append(UIMenu(title: "유리", image: UIImage(systemName: "drop.halffull"), children: glass))
         }
         if element.hasText {
             let sizes: [CGFloat] = [14, 18, 22, 28, 36, 48]
             items.append(UIMenu(title: "글자", image: UIImage(systemName: "textformat.size"), children: [
+                UIMenu(title: "글꼴", image: UIImage(systemName: "textformat"), children: TextFonts.available.map { option in
+                    UIAction(title: option.title, image: Self.fontPreview(option.id),
+                             state: element.font == option.id ? .on : .off) { [weak self] _ in
+                        self?.change("글꼴") { $0.font = option.id }
+                    }
+                }),
                 UIMenu(title: "크기", children: sizes.map { size in
                     UIAction(title: "\(Int(size))pt", state: abs(element.fontSize - size) < 0.5 ? .on : .off) { [weak self] _ in
                         self?.change("글자 크기") { $0.fontSize = size }
@@ -441,6 +475,16 @@ final class ElementController: NSObject, UITextViewDelegate {
         return UIMenu(children: items)
     }
 
+    /// 메뉴에 보여 줄 글꼴 견본 "가A"
+    private static func fontPreview(_ id: String) -> UIImage {
+        let font = TextFonts.font(id, size: 15, bold: false)
+        let text = NSAttributedString(string: "가A", attributes: [.font: font, .foregroundColor: UIColor.label])
+        let size = text.size()
+        return UIGraphicsImageRenderer(size: CGSize(width: max(28, ceil(size.width)), height: 20)).image { _ in
+            text.draw(at: CGPoint(x: 0, y: (20 - size.height) / 2))
+        }
+    }
+
     private func colorMenu(title: String, colors: [(String, RGBAColor)], current: RGBAColor,
                            apply: @escaping (inout PageElement, RGBAColor) -> Void) -> UIMenu {
         UIMenu(title: title, image: UIImage(systemName: "paintpalette"), children: colors.map { name, color in
@@ -462,7 +506,7 @@ final class ElementController: NSObject, UITextViewDelegate {
     private func apply(_ list: [PageElement], page: Int) {
         guard let host else { return }
         host.elementDocument.updateElements(list, page: page)
-        if let pageView = host.elementPageView(page) { refresh(pageView) }
+        if let pageView = host.elementPageView(page) { refresh(pageView, animated: true) }
         if let selected, selected.page == page, !list.contains(where: { $0.id == selected.id }) {
             host.elementPageView(page)?.selectionFrame.show(nil, zoom: 1)
             self.selected = nil

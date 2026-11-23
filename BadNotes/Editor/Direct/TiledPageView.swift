@@ -143,11 +143,19 @@ final class PageView: UIView {
     // MARK: 요소
 
     /// 문서의 요소 목록에 맞춰 뷰를 더하고·빼고·고침 (순서 = 목록 순서, 뒤가 위)
-    func setElements(_ elements: [PageElement], image: (String) -> CGImage?) {
+    func setElements(_ elements: [PageElement], image: (String) -> CGImage?, animated: Bool = false) {
         let ids = Set(elements.map(\.id))
         for (id, view) in elementViews where !ids.contains(id) {
-            view.removeFromSuperview()
             elementViews[id] = nil
+            if animated {
+                // 지울 때: 살짝 작아지며 사라짐
+                UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseIn]) {
+                    view.alpha = 0
+                    view.transform = CGAffineTransform(scaleX: 0.85, y: 0.85)
+                } completion: { _ in view.removeFromSuperview() }
+            } else {
+                view.removeFromSuperview()
+            }
         }
         for element in elements {
             let picture = element.imageID.flatMap(image)
@@ -158,6 +166,15 @@ final class PageView: UIView {
                 let view = ElementView(element: element, image: picture)
                 elementLayer.addSubview(view)
                 elementViews[element.id] = view
+                if animated {
+                    // 넣을 때: 톡 튀어나옴
+                    view.alpha = 0
+                    view.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
+                    UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.62, initialSpringVelocity: 0.4) {
+                        view.alpha = 1
+                        view.transform = .identity
+                    }
+                }
             }
         }
     }

@@ -57,7 +57,19 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(straightHighlighter, forKey: Keys.straightHighlighter) }
     }
 
+    /// 책처럼 한 장(가로면 두 장)씩 넘기기. 끄면 세로로 이어서 스크롤
+    var pageTurn: Bool {
+        didSet { UserDefaults.standard.set(pageTurn, forKey: Keys.pageTurn) }
+    }
+
+    /// 가로 화면에서 두 쪽을 양옆으로 펼쳐 보기
+    var twoUpLandscape: Bool {
+        didSet { UserDefaults.standard.set(twoUpLandscape, forKey: Keys.twoUpLandscape) }
+    }
+
     private enum Keys {
+        static let pageTurn = "pageTurn"
+        static let twoUpLandscape = "twoUpLandscape"
         static let editMode = "editMode"
         static let fingerDrawing = "fingerDrawing"
         static let tapToUndo = "tapToUndo"
@@ -70,6 +82,8 @@ final class AppSettings {
         fingerDrawing = defaults.bool(forKey: Keys.fingerDrawing)
         tapToUndo = defaults.object(forKey: Keys.tapToUndo) as? Bool ?? true
         straightHighlighter = defaults.object(forKey: Keys.straightHighlighter) as? Bool ?? true
+        pageTurn = defaults.object(forKey: Keys.pageTurn) as? Bool ?? true
+        twoUpLandscape = defaults.object(forKey: Keys.twoUpLandscape) as? Bool ?? true
         #if DEBUG
         // 시뮬레이터 점검용: 마우스(손가락)로 그리기
         if ProcessInfo.processInfo.arguments.contains("-BNFingerDraw") { fingerDrawing = true }

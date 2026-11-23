@@ -129,6 +129,18 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
         canvas.drawingPolicy = on ? .anyInput : .pencilOnly
     }
 
+    private var twoUp = AppSettings.shared.twoUpLandscape
+
+    /// 가로 두 쪽 설정이 바뀌면 다시 배치 (페이지 자리가 바뀌면 필기도 다시 합침)
+    func setTwoUp(_ on: Bool) {
+        guard on != twoUp else { return }
+        twoUp = on
+        guard laidOutWidth > 0 else { return }
+        let keep = bridge.page
+        layoutPages(resetZoom: true)
+        scroll(toPage: keep, animated: false)
+    }
+
     func prepareForRemoval() {
         elements.endEditing()
         toolPicker.setVisible(false, forFirstResponder: canvas)
@@ -172,17 +184,30 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     private func layoutPages(resetZoom: Bool) {
         let maxWidth = pageViews.map(\.bounds.width).max() ?? 1
         let gap = max(12, maxWidth * 0.025)
+        let spine: CGFloat = 2
+        // 가로 화면이면 두 쪽씩 양옆으로 (표지는 혼자)
+        let rows = PageRows.make(count: pageViews.count, twoUp: twoUp && bounds.width > bounds.height,
+                                 coverAlone: document.hasCover)
+        func width(_ row: [Int]) -> CGFloat {
+            row.reduce(0) { $0 + pageViews[$1].bounds.width } + spine * CGFloat(max(0, row.count - 1))
+        }
+        let contentWidth = rows.map(width).max() ?? maxWidth
         var y = gap
-        var origins: [CGPoint] = []
-        for view in pageViews {
-            let origin = CGPoint(x: gap + (maxWidth - view.bounds.width) / 2, y: y)
-            view.frame.origin = origin
-            origins.append(origin)
-            y += view.bounds.height + gap
+        var origins = Array(repeating: CGPoint.zero, count: pageViews.count)
+        for row in rows {
+            var x = gap + (contentWidth - width(row)) / 2
+            let h = row.map { pageViews[$0].bounds.height }.max() ?? 0
+            for index in row {
+                let view = pageViews[index]
+                origins[index] = CGPoint(x: x, y: y + (h - view.bounds.height) / 2)
+                view.frame.origin = origins[index]
+                x += view.bounds.width + spine
+            }
+            y += h + gap
         }
         let moved = !pageOrigins.isEmpty && Array(origins.prefix(pageOrigins.count)) != pageOrigins
         pageOrigins = origins
-        natural = CGSize(width: maxWidth + gap * 2, height: y)
+        natural = CGSize(width: contentWidth + gap * 2, height: y)
         pagesView.bounds = CGRect(origin: .zero, size: natural)
 
         let fit = bounds.width / natural.width
@@ -342,6 +367,7 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
             if origin.y <= centerY { current = index } else { break }
         }
         if bridge.page != current { bridge.page = current }
+        if bridge.isBook { bridge.isBook = false }
         if let last = pageViews.last, let origin = pageOrigins.last {
             let maxY = (origin.y + last.bounds.height) * canvas.zoomScale
             let atEnd = maxY <= canvas.contentOffset.y + canvas.bounds.height + 40
@@ -421,8 +447,10 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
         }
         if elements.isEditing {
             if elements.isInsideEditing(point, page: pageView.index) { return }
+            // 글 입력 중에 다른 데를 누르면 입력만 끝냄
             elements.endEditing()
             showToolPicker()
+            return
         }
         if let hit = elements.hit(point, page: pageView.index) {
             if elements.selected?.id == hit.id, hit.hasText {
@@ -556,6 +584,7 @@ struct PencilKitEditor: UIViewRepresentable {
     let bridge: EditorBridge
     let initialPage: Int
     let fingerDrawing: Bool
+    let twoUp: Bool
     let insets: EdgeInsets
 
     func makeUIView(context: Context) -> PencilKitEditorView {
@@ -566,6 +595,7 @@ struct PencilKitEditor: UIViewRepresentable {
 
     func updateUIView(_ view: PencilKitEditorView, context: Context) {
         view.setFingerDrawing(fingerDrawing)
+        view.setTwoUp(twoUp)
         view.chromeInsets = UIEdgeInsets(top: insets.top, left: insets.leading, bottom: insets.bottom, right: insets.trailing)
     }
 
