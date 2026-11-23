@@ -72,6 +72,9 @@ nonisolated struct PageElement: Codable, Hashable, Identifiable, Sendable {
     var glassClear = false
     /// 유리에 입히는 색의 진하기 (0 = 색 없음). 색은 fillColor
     var glassTint: Double = 0
+    /// 글자 자체를 Liquid Glass로 (색 = textColor) + 진하기 0~1
+    var glassText = false
+    var glassTextStrength: Double = 0.4
 
     init(kind: Kind, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) {
         self.kind = kind
@@ -87,7 +90,7 @@ nonisolated struct PageElement: Codable, Hashable, Identifiable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, kind, x, y, width, height, text, fontSize, bold, textColor, alignment, fill, fillColor, imageID
-        case font, glassClear, glassTint
+        case font, glassClear, glassTint, glassText, glassTextStrength
     }
 
     /// 예전(1.2) 파일에는 글꼴·유리 값이 없어서 없으면 기본값
@@ -110,6 +113,8 @@ nonisolated struct PageElement: Codable, Hashable, Identifiable, Sendable {
         font = try c.decodeIfPresent(String.self, forKey: .font) ?? "system"
         glassClear = try c.decodeIfPresent(Bool.self, forKey: .glassClear) ?? (kind == .sticky)
         glassTint = try c.decodeIfPresent(Double.self, forKey: .glassTint) ?? (kind == .sticky ? 0.3 : 0)
+        glassText = try c.decodeIfPresent(Bool.self, forKey: .glassText) ?? false
+        glassTextStrength = try c.decodeIfPresent(Double.self, forKey: .glassTextStrength) ?? 0.4
     }
 
     var frame: CGRect {
@@ -123,7 +128,8 @@ nonisolated struct PageElement: Codable, Hashable, Identifiable, Sendable {
     }
 
     var hasText: Bool { kind != .image }
-    var usesGlass: Bool { kind == .sticky || (kind == .text && fill == .glass) }
+    /// 메모지는 '색 바탕'이면 종이 메모지, 아니면 유리 메모지 (예전 메모지는 바탕 값이 없어서 유리)
+    var usesGlass: Bool { kind == .sticky ? fill != .color : (kind == .text && fill == .glass) }
 
     /// 글자 둘레 여백
     var padding: CGSize {
@@ -142,10 +148,12 @@ nonisolated struct PageElement: Codable, Hashable, Identifiable, Sendable {
         }
     }
 
-    /// 메모지 색 고르기
+    /// 메모지 색 고르기 (종이 메모지에도 유리 메모지에도 어울리는 파스텔)
     static let stickyColors: [(String, RGBAColor)] = [
-        ("노랑", RGBAColor(hex: 0xFFD84D)), ("분홍", RGBAColor(hex: 0xFF8FB8)), ("하늘", RGBAColor(hex: 0x6CC4FF)),
-        ("민트", RGBAColor(hex: 0x6EE0B4)), ("보라", RGBAColor(hex: 0xB79CFF)), ("투명", RGBAColor(hex: 0xFFFFFF, alpha: 0)),
+        ("빨강", RGBAColor(hex: 0xF4A6A6)), ("주황", RGBAColor(hex: 0xF8C8A0)), ("노랑", RGBAColor(hex: 0xF6E27F)),
+        ("연두", RGBAColor(hex: 0xBDE8A4)), ("민트", RGBAColor(hex: 0xA8E3DC)), ("하늘", RGBAColor(hex: 0xC4D9F7)),
+        ("보라", RGBAColor(hex: 0xDCCBF5)), ("분홍", RGBAColor(hex: 0xF5C6E3)), ("회색", RGBAColor(hex: 0xDEDBD3)),
+        ("흰색", RGBAColor(hex: 0xFFFFFF)),
     ]
 
     /// 색 바탕 고르기
@@ -189,9 +197,9 @@ nonisolated enum ElementRenderer {
     static func drawBackground(_ e: PageElement, in context: CGContext, rect: CGRect, live: Bool) {
         let path = UIBezierPath(roundedRect: rect, cornerRadius: min(e.cornerRadius, rect.width / 2, rect.height / 2)).cgPath
         switch (e.kind, e.fill) {
-        case (.text, .color):
+        case (.text, .color), (.sticky, .color):
             context.addPath(path)
-            context.setFillColor(e.fillColor.uiColor.cgColor)
+            context.setFillColor(e.fillColor.uiColor.withAlphaComponent(e.fillColor.a < 0.01 ? 1 : e.fillColor.a).cgColor)
             context.fillPath()
         case (.sticky, _), (.text, .glass):
             guard !live else { return }
@@ -221,7 +229,7 @@ nonisolated enum ElementRenderer {
     }
 
     /// 글자 또는 사진. UIKit 좌표(위가 원점)인 상태에서 불러야 함
-    static func drawContent(_ e: PageElement, image: CGImage?, in context: CGContext, rect: CGRect) {
+    static func drawContent(_ e: PageElement, image: CGImage?, in context: CGContext, rect: CGRect, forPDF: Bool = false) {
         switch e.kind {
         case .image:
             guard let image else {
@@ -238,6 +246,16 @@ nonisolated enum ElementRenderer {
             context.restoreGState()
         case .text, .sticky:
             guard !e.text.isEmpty else { return }
+            if e.glassText {
+                // 화면에서는 진짜 Liquid Glass 층(GlassShapeHost)이 그림. 여기서는 PDF용 흉내만
+                guard forPDF else { return }
+                let inner = rect.insetBy(dx: e.padding.width, dy: e.padding.height)
+                let outline = GlyphOutline.path(text: e.text, attributes: attributes(e), in: inner)
+                GlassInk.draw(outline: outline, tint: e.textColor.uiColor.withAlphaComponent(1).cgColor,
+                              strength: CGFloat(e.glassTextStrength), thickness: max(1.2, e.fontSize * 0.09),
+                              forPDF: forPDF, in: context)
+                return
+            }
             UIGraphicsPushContext(context)
             let inner = rect.insetBy(dx: e.padding.width, dy: e.padding.height)
             (e.text as NSString).draw(with: CGRect(x: inner.minX, y: inner.minY, width: inner.width, height: .greatestFiniteMagnitude),
@@ -366,8 +384,9 @@ nonisolated final class ElementAnnotation: PDFAnnotation {
     private var elements: [PageElement] = []
     private var images: [String: CGImage] = [:]
     private var geometry = PageGeometry(box: .zero, rotation: 0)
+    private var bakeGlass = true
 
-    init(elements: [PageElement], images: [String: Data], geometry: PageGeometry) throws {
+    init(elements: [PageElement], images: [String: Data], geometry: PageGeometry, bakeGlass: Bool = true) throws {
         var rect = elements.reduce(CGRect.null) { $0.union($1.frame) }
             .applying(geometry.canvasToPage).insetBy(dx: -2, dy: -2).intersection(geometry.box)
         if rect.isNull || rect.width < 1 || rect.height < 1 {
@@ -376,6 +395,7 @@ nonisolated final class ElementAnnotation: PDFAnnotation {
         super.init(bounds: rect, forType: .stamp, withProperties: nil)
         self.elements = elements
         self.geometry = geometry
+        self.bakeGlass = bakeGlass
         let used = Set(elements.compactMap(\.imageID))
         let mine = images.filter { used.contains($0.key) }
         for (id, data) in mine { self.images[id] = ElementImages.decode(data) }
@@ -395,8 +415,11 @@ nonisolated final class ElementAnnotation: PDFAnnotation {
         context.saveGState()
         context.concatenate(geometry.canvasToPage)
         for element in elements {
-            ElementRenderer.drawBackground(element, in: context, rect: element.frame, live: false)
-            ElementRenderer.drawContent(element, image: element.imageID.flatMap { images[$0] }, in: context, rect: element.frame)
+            // .badnote: 유리(바탕·메모지·유리 글자)는 흉내 내지 않음
+            if !bakeGlass && element.glassText { continue }
+            ElementRenderer.drawBackground(element, in: context, rect: element.frame, live: !bakeGlass)
+            ElementRenderer.drawContent(element, image: element.imageID.flatMap { images[$0] }, in: context, rect: element.frame,
+                                        forPDF: true)
         }
         context.restoreGState()
     }

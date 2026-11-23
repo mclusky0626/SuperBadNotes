@@ -14,7 +14,7 @@ final class InkToolState {
     static let shared = InkToolState()
 
     enum Tool: String, Codable, CaseIterable, Identifiable {
-        case pen, highlighter, eraser, lasso, text
+        case pen, highlighter, eraser, lasso, text, sticky, image
         var id: String { rawValue }
 
         var title: String {
@@ -24,6 +24,8 @@ final class InkToolState {
             case .eraser: "지우개"
             case .lasso: "올가미"
             case .text: "텍스트"
+            case .sticky: "메모지"
+            case .image: "이미지"
             }
         }
 
@@ -34,15 +36,20 @@ final class InkToolState {
             case .eraser: "eraser"
             case .lasso: "lasso"
             case .text: "character.textbox"
+            case .sticky: "note.text"
+            case .image: "photo"
             }
         }
+
+        /// 페이지를 눌러서 무언가를 놓는 도구 (펜슬·손가락 탭으로)
+        var places: Bool { self == .text || self == .sticky || self == .image }
 
         /// 펜슬로 긋는 도구 (펜슬이 페이지에 닿으면 이 도구가 받음)
         var draws: Bool { self == .pen || self == .highlighter || self == .eraser || self == .lasso }
     }
 
     enum PenStyle: String, Codable, CaseIterable, Identifiable {
-        case ballpoint, fountain, brush, pencil
+        case ballpoint, fountain, brush, pencil, glass
         var id: String { rawValue }
 
         var title: String {
@@ -51,6 +58,7 @@ final class InkToolState {
             case .fountain: "만년필"
             case .brush: "붓펜"
             case .pencil: "연필"
+            case .glass: "Liquid Glass 펜"
             }
         }
 
@@ -60,13 +68,14 @@ final class InkToolState {
             case .fountain: "pencil.tip"
             case .brush: "paintbrush.pointed"
             case .pencil: "pencil"
+            case .glass: "drop.halffull"
             }
         }
 
         /// 만년필은 Apple의 납작한 캘리그라피 펜촉 대신, 굿노트처럼 필압으로 굵기가 변하는 펜
         var inkType: PKInk.InkType {
             switch self {
-            case .ballpoint: .monoline
+            case .ballpoint, .glass: .monoline
             case .fountain, .brush: .pen
             case .pencil: .pencil
             }
@@ -75,7 +84,7 @@ final class InkToolState {
         /// 필압에 따라 굵기가 몇 배까지 변하는지
         var pressureRange: ClosedRange<CGFloat> {
             switch self {
-            case .ballpoint, .pencil: 1...1
+            case .ballpoint, .pencil, .glass: 1...1
             case .fountain: 0.7...1.3
             case .brush: 0.3...1.6
             }
@@ -127,6 +136,29 @@ final class InkToolState {
     var textFill: PageElement.Fill = .none { didSet { save() } }
     var textSize: CGFloat = 20 { didSet { save() } }
     var textFont = "system" { didSet { save() } }
+    var textColor = RGBAColor(hex: 0x1C1C1E) { didSet { save() } }
+    var textBold = false { didSet { save() } }
+    /// 0 왼쪽, 1 가운데, 2 오른쪽
+    var textAlignment = 0 { didSet { save() } }
+    /// 유리 바탕: 맑게(뒤가 비침) / 뿌옇게
+    var textGlassClear = false { didSet { save() } }
+
+    /// 메모지 도구: 색, Liquid Glass로 만들지(끄면 종이 메모지), 맑게
+    var stickyColor = PageElement.stickyColors[2].1 { didSet { save() } }
+    var stickyGlass = true { didSet { save() } }
+    var stickyGlassClear = true { didSet { save() } }
+
+    /// Liquid Glass 펜 진하기 (0 투명 ~ 1 진한 색 유리)
+    var glassPenStrength: Double = 0.35 { didSet { save() } }
+    /// 유리 글자 (글자 자체가 유리) + 진하기
+    var textGlass = false { didSet { save() } }
+    var textGlassStrength: Double = 0.4 { didSet { save() } }
+
+    /// 지금 긋는 획의 씨앗값: 유리펜이면 유리 표시를 넣음 (임시 획은 고정)
+    func strokeSeed(preview: Bool) -> UInt32 {
+        guard inkTool == .pen, penStyle == .glass else { return InkOrigin.badNotesSeed(preview: preview) }
+        return GlassInk.seed(strength: glassPenStrength, salt: preview ? 0 : UInt32.random(in: 0...255))
+    }
 
     var tool: Tool = .pen {
         didSet {
@@ -258,6 +290,30 @@ final class InkToolState {
         tool = previousTool
     }
 
+    /// 글상자·메모지를 고치기 시작하면 도구 막대가 그 상자의 모양을 보여 줌
+    func adopt(_ element: PageElement) {
+        switch element.kind {
+        case .text:
+            textFont = element.font
+            textSize = element.fontSize
+            textColor = element.textColor
+            textBold = element.bold
+            textAlignment = element.alignment
+            textFill = element.fill
+            if element.fill == .glass { textGlassClear = element.glassClear }
+            textGlass = element.glassText
+            if element.glassText { textGlassStrength = element.glassTextStrength }
+            if tool != .text { tool = .text }
+        case .sticky:
+            stickyColor = element.fillColor
+            stickyGlass = element.usesGlass
+            if element.usesGlass { stickyGlassClear = element.glassClear }
+            if tool != .sticky { tool = .sticky }
+        case .image:
+            break
+        }
+    }
+
     // MARK: 저장
 
     private struct Stored: Codable {
@@ -280,6 +336,16 @@ final class InkToolState {
         var textFill: PageElement.Fill?
         var textSize: CGFloat?
         var textFont: String?
+        var textColor: RGBAColor?
+        var textBold: Bool?
+        var textAlignment: Int?
+        var textGlassClear: Bool?
+        var stickyColor: RGBAColor?
+        var stickyGlass: Bool?
+        var stickyGlassClear: Bool?
+        var glassPenStrength: Double?
+        var textGlass: Bool?
+        var textGlassStrength: Double?
     }
 
     private static let key = "inkTools"
@@ -302,6 +368,16 @@ final class InkToolState {
         textFill = s.textFill ?? .none
         textSize = s.textSize ?? 20
         textFont = s.textFont ?? "system"
+        textColor = s.textColor ?? RGBAColor(hex: 0x1C1C1E)
+        textBold = s.textBold ?? false
+        textAlignment = s.textAlignment ?? 0
+        textGlassClear = s.textGlassClear ?? false
+        stickyColor = s.stickyColor ?? PageElement.stickyColors[2].1
+        stickyGlass = s.stickyGlass ?? true
+        stickyGlassClear = s.stickyGlassClear ?? true
+        glassPenStrength = s.glassPenStrength ?? 0.35
+        textGlass = s.textGlass ?? false
+        textGlassStrength = s.textGlassStrength ?? 0.4
         penWidthIndex = min(max(0, s.penWidthIndex), penWidths.count - 1)
         if s.highlighterColors.count == 3 { highlighterColors = s.highlighterColors }
         highlighterColorIndex = min(max(0, s.highlighterColorIndex), 2)
@@ -319,7 +395,10 @@ final class InkToolState {
                        highlighterWidthIndex: highlighterWidthIndex, eraserSizeIndex: eraserSizeIndex,
                        penWidths: penWidths, highlighterWidths: highlighterWidths, eraserSizes: eraserSizes,
                        eraserHighlighterOnly: eraserHighlighterOnly, textFill: textFill, textSize: textSize,
-                       textFont: textFont)
+                       textFont: textFont, textColor: textColor, textBold: textBold, textAlignment: textAlignment,
+                       textGlassClear: textGlassClear, stickyColor: stickyColor, stickyGlass: stickyGlass,
+                       stickyGlassClear: stickyGlassClear, glassPenStrength: glassPenStrength,
+                       textGlass: textGlass, textGlassStrength: textGlassStrength)
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.key)
         }

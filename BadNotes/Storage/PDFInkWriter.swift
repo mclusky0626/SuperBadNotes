@@ -59,6 +59,7 @@ nonisolated enum PDFInkWriter {
         let data = try NoteLoader.coordinatedRead(url)
         guard let document = PDFDocument(data: data) else { throw WriteError.unreadable }
         if document.isLocked { throw WriteError.locked }
+        let bake = NoteFormat.bakesGlass(url)
 
         // 페이지를 넘겨준 문서는 쓰기가 끝날 때까지 살려 둠
         var sources: [PDFDocument] = []
@@ -85,14 +86,14 @@ nonisolated enum PDFInkWriter {
             if let elements = content.elements {
                 if !elements.isEmpty {
                     let pool = images.merging(placed.images) { a, _ in a }
-                    page.addAnnotation(try ElementAnnotation(elements: elements, images: pool, geometry: geometry))
+                    page.addAnnotation(try ElementAnnotation(elements: elements, images: pool, geometry: geometry, bakeGlass: bake))
                 }
             } else {
                 for old in placed.annotations { page.addAnnotation(old) }
             }
             if let drawing = content.drawing {
                 if !drawing.strokes.isEmpty {
-                    page.addAnnotation(try InkAnnotation(drawing: drawing, geometry: geometry))
+                    page.addAnnotation(try InkAnnotation(drawing: drawing, geometry: geometry, bakeGlass: bake))
                 }
             } else {
                 for old in ink.annotations { page.addAnnotation(old) }
@@ -121,6 +122,7 @@ nonisolated enum PDFInkWriter {
         let data = try NoteLoader.coordinatedRead(url)
         guard let document = PDFDocument(data: data), let first = document.page(at: 0) else { throw WriteError.unreadable }
         if document.isLocked { throw WriteError.locked }
+        if PaperSpec.isBoard(document.documentAttributes) { throw WriteError.verifyFailed("화이트보드에는 표지를 넣을 수 없음") }
         let hadCover = PaperSpec.hasCover(document.documentAttributes)
         let size = PageGeometry(page: first).canvasSize
         let coverData = PaperRenderer.coverPDF(cover, title: title, size: size)
@@ -141,10 +143,11 @@ nonisolated enum PDFInkWriter {
         document.insert(page, at: 0)
         let geometry = PageGeometry(page: page)
         if !placed.elements.isEmpty {
-            page.addAnnotation(try ElementAnnotation(elements: placed.elements, images: placed.images, geometry: geometry))
+            page.addAnnotation(try ElementAnnotation(elements: placed.elements, images: placed.images, geometry: geometry,
+                                                     bakeGlass: NoteFormat.bakesGlass(url)))
         }
         if !ink.drawing.strokes.isEmpty {
-            page.addAnnotation(try InkAnnotation(drawing: ink.drawing, geometry: geometry))
+            page.addAnnotation(try InkAnnotation(drawing: ink.drawing, geometry: geometry, bakeGlass: NoteFormat.bakesGlass(url)))
         }
         for annotation in others {
             first.removeAnnotation(annotation)
@@ -164,7 +167,8 @@ nonisolated enum PDFInkWriter {
         defer { try? fm.removeItem(at: tempDir) }
         let temp = tempDir.appendingPathComponent(url.lastPathComponent)
         guard document.write(to: temp) else { throw WriteError.writeFailed }
-        guard let check = PDFDocument(url: temp), check.pageCount == pageCount else {
+        guard let checkData = try? Data(contentsOf: temp), let check = PDFDocument(data: checkData),
+              check.pageCount == pageCount else {
             throw WriteError.verifyFailed("표지를 바꾼 PDF를 다시 열 수 없음")
         }
         try replace(url, with: temp)
@@ -173,7 +177,7 @@ nonisolated enum PDFInkWriter {
     }
 
     private static func verify(_ url: URL, pageCount: Int, expected: [Int: PageContent]) throws {
-        guard let document = PDFDocument(url: url) else {
+        guard let data = try? Data(contentsOf: url), let document = PDFDocument(data: data) else {
             throw WriteError.verifyFailed("다시 열 수 없음")
         }
         guard document.pageCount == pageCount else {

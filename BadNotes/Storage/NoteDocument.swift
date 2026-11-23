@@ -35,6 +35,8 @@ final class NoteDocument {
     var isNotebook: Bool { paperSpec != nil }
     /// 첫 장이 표지인 노트북 (처음 열 때 표지 다음 장부터 보여 줌)
     @ObservationIgnored private(set) var hasCover = false
+    /// 무한 화이트보드 (아주 큰 한 장, 페이지 추가 없음)
+    @ObservationIgnored private(set) var isBoard = false
     /// PDF 타일을 그리는 동안 페이지가 들어오지 않게 (읽기 여럿 / 쓰기 하나)
     nonisolated let renderLock = ReadWriteLock()
 
@@ -86,6 +88,7 @@ final class NoteDocument {
         self.journal = journal
         self.paperSpec = PaperSpec.from(documentAttributes: opened.loaded.pdf.documentAttributes)
         self.hasCover = PaperSpec.hasCover(opened.loaded.pdf.documentAttributes)
+        self.isBoard = PaperSpec.isBoard(opened.loaded.pdf.documentAttributes)
         // 큰 파일일수록 저장 간격을 늘림 (10MB당 1.5초, 3~15초)
         let seconds = min(15, max(3, Double(opened.fileSize) / 10_000_000 * 1.5))
         self.saveDelay = .milliseconds(Int(seconds * 1000))
@@ -119,6 +122,13 @@ final class NoteDocument {
     }
 
     // MARK: 필기
+
+    /// 화이트보드에서 처음 보여 줄 곳: 필기·요소가 있는 영역 (없으면 nil)
+    func contentBounds(page: Int) -> CGRect? {
+        var rect = drawings[page]?.bounds ?? .null
+        for element in elementsByPage[page] ?? [] { rect = rect.union(element.frame) }
+        return rect.isNull || rect.isEmpty ? nil : rect
+    }
 
     func drawing(for page: Int) -> PKDrawing {
         drawings[page] ?? PKDrawing()
@@ -184,6 +194,7 @@ final class NoteDocument {
     /// 화면용 문서에는 바로 넣고, 파일에는 곧 저장. 새 페이지 번호를 돌려줌
     @discardableResult
     func appendPage() -> Int? {
+        guard !isBoard else { return nil }
         let spec = paperSpec ?? blankPaperMatchingLastPage()
         let data = PaperRenderer.pagePDF(spec)
         guard let source = PDFDocument(data: data), let page = source.page(at: 0) else {

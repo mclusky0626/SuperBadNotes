@@ -83,6 +83,20 @@ nonisolated enum PaperRenderer {
         }
     }
 
+    /// 화이트보드: 아주 큰 빈 페이지 한 장 (점 무늬는 앱이 화면에만 그림 → 파일이 가벼움)
+    static func boardPDF(name: String) -> Data {
+        let side = PaperSpec.boardSide
+        let format = UIGraphicsPDFRendererFormat()
+        format.documentInfo = [
+            kCGPDFContextTitle as String: name,
+            kCGPDFContextCreator as String: "BadNotes",
+            kCGPDFContextKeywords as String: ["BadNotes", PaperSpec.boardKeyword],
+        ]
+        return UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: side, height: side), format: format).pdfData { context in
+            context.beginPage()
+        }
+    }
+
     /// 표지 한 장짜리 PDF (표지 바꾸기)
     static func coverPDF(_ cover: CoverStyle, title: String, size: CGSize) -> Data {
         let rect = CGRect(origin: .zero, size: size)

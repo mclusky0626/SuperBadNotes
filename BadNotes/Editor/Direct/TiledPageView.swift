@@ -9,6 +9,7 @@
 
 import UIKit
 import PDFKit
+import PencilKit
 
 /// 타일 하나를 그리는 쪽 (백그라운드 스레드에서 불림)
 nonisolated protocol TileRenderer: AnyObject, Sendable {
@@ -84,6 +85,30 @@ nonisolated final class PDFPageTileRenderer: TileRenderer, @unchecked Sendable {
     }
 }
 
+/// 화이트보드 바탕: 점 무늬를 보이는 조각에만 그림 (멀리서 보면 점 간격을 넓힘)
+nonisolated final class BoardTileRenderer: TileRenderer, @unchecked Sendable {
+    func drawTile(in context: CGContext) {
+        let clip = context.boundingBoxOfClipPath
+        context.setFillColor(UIColor(red: 0.985, green: 0.983, blue: 0.975, alpha: 1).cgColor)
+        context.fill(clip)
+        let scale = max(0.01, abs(context.ctm.a))
+        var spacing: CGFloat = 32
+        while spacing * scale < 14 { spacing *= 4 }
+        let radius = max(1.1, 1.3 / scale)
+        context.setFillColor(UIColor(white: 0.72, alpha: 1).cgColor)
+        var y = (clip.minY / spacing).rounded(.down) * spacing
+        while y <= clip.maxY + spacing {
+            var x = (clip.minX / spacing).rounded(.down) * spacing
+            while x <= clip.maxX + spacing {
+                context.addEllipse(in: CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2))
+                x += spacing
+            }
+            y += spacing
+        }
+        context.fillPath()
+    }
+}
+
 /// 페이지 필기
 nonisolated final class InkTileRenderer: TileRenderer, @unchecked Sendable {
     private let ink: PageInk
@@ -95,11 +120,34 @@ nonisolated final class InkTileRenderer: TileRenderer, @unchecked Sendable {
     func drawTile(in context: CGContext) {
         let clip = context.boundingBoxOfClipPath
         let snapshot = ink.renderSnapshot()
+        let scale = max(0.05, abs(context.ctm.a))
         var drawnPending: [StrokeKey] = []
+        // Apple 도구로 그은 획은 이어진 것끼리 모아서 Apple 렌더러로 한 번에 (순서는 지킴)
+        var appleRun: [PKStroke] = []
+        func flushApple() {
+            guard !appleRun.isEmpty else { return }
+            let drawing = PKDrawing(strokes: appleRun)
+            appleRun = []
+            var image: UIImage?
+            UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                image = drawing.image(from: clip, scale: scale)
+            }
+            guard let image else { return }
+            UIGraphicsPushContext(context)
+            image.draw(in: clip)
+            UIGraphicsPopContext()
+        }
         for stroke in snapshot.strokes where stroke.bounds.intersects(clip) {
-            InkRenderer.draw(stroke, in: context, smooth: true)
+            if let source = stroke.appleSource {
+                appleRun.append(source)
+            } else {
+                flushApple()
+                // 유리펜 획은 진짜 Liquid Glass 층이 그림 (타일에는 안 그림)
+                if stroke.glassStrength == nil { InkRenderer.draw(stroke, in: context, smooth: true) }
+            }
             if snapshot.pending.contains(stroke.key) { drawnPending.append(stroke.key) }
         }
+        flushApple()
         if !drawnPending.isEmpty {
             ink.recordDrawn(clip, keys: drawnPending)
         }
@@ -116,13 +164,21 @@ final class PageView: UIView {
     private let elementLayer = UIView()
     private(set) var elementViews: [UUID: ElementView] = [:]
     let selectionFrame = SelectionFrameView()
+    /// 유리펜 획 모양의 진짜 Liquid Glass (색·진하기별 하나, 필기 타일 바로 위)
+    private var glassHosts: [String: GlassShapeHost] = [:]
+    private var glassOutlines: [StrokeKey: CGPath] = [:]
+    private let showsInk: Bool
 
     /// showsInk: Apple 도구 모드에서는 필기를 PencilKit이 직접 그려서 끔
-    init(index: Int, page: PDFPage, size: CGSize, ink: PageInk, documentLock: ReadWriteLock, showsInk: Bool = true) {
+    init(index: Int, page: PDFPage, size: CGSize, ink: PageInk, documentLock: ReadWriteLock, showsInk: Bool = true,
+         board: Bool = false) {
         self.index = index
         self.ink = ink
+        self.showsInk = showsInk
         let rect = CGRect(origin: .zero, size: size)
-        pdfTiles = TiledView(frame: rect, renderer: PDFPageTileRenderer(page: page, size: size, documentLock: documentLock))
+        let background: any TileRenderer = board ? BoardTileRenderer()
+            : PDFPageTileRenderer(page: page, size: size, documentLock: documentLock)
+        pdfTiles = TiledView(frame: rect, renderer: background)
         inkTiles = TiledView(frame: rect, renderer: InkTileRenderer(ink: ink))
         super.init(frame: rect)
         backgroundColor = .white
@@ -131,12 +187,16 @@ final class PageView: UIView {
         layer.shadowRadius = 10
         layer.shadowOffset = CGSize(width: 0, height: 3)
         layer.shadowPath = UIBezierPath(rect: rect).cgPath
+        if board { layer.shadowOpacity = 0 }
         addSubview(pdfTiles)
         elementLayer.frame = rect
         elementLayer.isUserInteractionEnabled = true
         // 자르기(clipsToBounds)를 켜면 따로 그려져서 유리가 뒤의 종이를 못 봄
         addSubview(elementLayer)
-        if showsInk { addSubview(inkTiles) }
+        if showsInk {
+            addSubview(inkTiles)
+            updateGlassInk()
+        }
         addSubview(selectionFrame)
     }
 
@@ -185,8 +245,46 @@ final class PageView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// 유리펜 획: 색·진하기가 같은 획끼리 윤곽을 합쳐서 그 모양의 진짜 Liquid Glass를 필기 위에 얹음
+    func updateGlassInk() {
+        guard showsInk else { return }
+        let strokes = ink.renderSnapshot().strokes.filter { $0.glassStrength != nil }
+        var next: [StrokeKey: CGPath] = [:]
+        var groups: [String: (path: CGMutablePath, color: CGColor, strength: CGFloat)] = [:]
+        for s in strokes {
+            let outline = glassOutlines[s.key] ?? {
+                var shape = GlassInk.outline(centerline: InkRenderer.centerline(s.points, smooth: true), width: s.meanWidth)
+                if let mask = s.mask, s.maskSpace == .path { shape = shape.intersection(mask) }
+                var t = s.transform
+                return shape.copy(using: &t) ?? shape
+            }()
+            next[s.key] = outline
+            let strength = s.glassStrength ?? 0
+            let c = s.color.components ?? []
+            let key = c.map { String(format: "%.3f", Double($0)) }.joined(separator: ",") + "|\(Int(strength * 100))"
+            if groups[key] == nil { groups[key] = (CGMutablePath(), s.color, strength) }
+            groups[key]?.path.addPath(outline)
+        }
+        glassOutlines = next
+        for (key, view) in glassHosts where groups[key] == nil {
+            view.removeFromSuperview()
+            glassHosts[key] = nil
+        }
+        for (key, group) in groups {
+            let tint = UIColor(cgColor: group.color)
+            if let view = glassHosts[key] {
+                view.update(path: group.path, tint: tint, strength: Double(group.strength))
+            } else {
+                let view = GlassShapeHost(path: group.path, tint: tint, strength: Double(group.strength), frame: bounds)
+                insertSubview(view, aboveSubview: inkTiles)
+                glassHosts[key] = view
+            }
+        }
+    }
+
     func invalidateInk(_ rect: CGRect) {
         guard !rect.isNull, !rect.isEmpty else { return }
+        updateGlassInk()
         inkTiles.invalidate(rect.insetBy(dx: -2, dy: -2))
     }
 }

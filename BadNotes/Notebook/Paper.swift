@@ -9,6 +9,35 @@
 
 import UIKit
 
+/// 문서 파일 형식. 둘 다 속은 PDF라서 BadNotes에서는 똑같이 열리고 진짜 Liquid Glass로 보임.
+/// 차이는 다른 앱용 모양: PDF는 유리를 비슷한 그림으로 구워 넣고, .badnote는 아무것도 흉내 내지 않음 (BadNotes 전용)
+nonisolated enum NoteFormat: String, Codable, CaseIterable, Identifiable, Sendable {
+    case pdf, badnote
+    var id: String { rawValue }
+    var ext: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .pdf: "PDF"
+        case .badnote: "BadNotes 노트 (.badnote)"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .pdf: "파일 앱·미리보기·다른 PDF 앱에서도 열려요. Liquid Glass는 다른 앱에서 비슷한 그림으로 보여요."
+        case .badnote: "Liquid Glass를 흉내 내지 않고 그대로 두는 BadNotes 전용 형식이에요. 다른 앱에 줄 땐 PDF로 내보내기."
+        }
+    }
+
+    static let extensions: Set<String> = Set(allCases.map(\.ext))
+
+    static func of(_ url: URL) -> NoteFormat { url.pathExtension.lowercased() == "badnote" ? .badnote : .pdf }
+
+    /// 다른 앱용 모양에 유리 흉내를 구워 넣을지
+    static func bakesGlass(_ url: URL) -> Bool { of(url) == .pdf }
+}
+
 nonisolated struct PaperSpec: Codable, Hashable, Sendable {
     enum Template: String, Codable, CaseIterable, Identifiable, Sendable {
         case blank, dotted, grid, ruledNarrow, ruledWide
@@ -97,6 +126,13 @@ nonisolated struct PaperSpec: Codable, Hashable, Sendable {
     static let keywordPrefix = "BadNotesPaper="
     /// 첫 장이 표지인 노트북
     static let coverPrefix = "BadNotesCover="
+    /// 무한 화이트보드 (아주 큰 한 장)
+    static let boardKeyword = "BadNotesBoard=dots"
+    static let boardSide: CGFloat = 14_000
+
+    static func isBoard(_ documentAttributes: [AnyHashable: Any]?) -> Bool {
+        keywords(documentAttributes).contains { $0.hasPrefix("BadNotesBoard=") }
+    }
 
     var keyword: String {
         "\(Self.keywordPrefix)\(template.rawValue);\(tone.rawValue);\(Int(width.rounded()));\(Int(height.rounded()))"

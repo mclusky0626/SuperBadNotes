@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import PencilKit
 
 struct ContentView: View {
     @Environment(ThemeStore.self) private var themes
@@ -153,6 +154,66 @@ struct ContentView: View {
                 await openNote(try DemoDocument.make(), remember: false)
             } catch {
                 log.error("시연 문서 만들기 실패: \(error.localizedDescription)")
+            }
+            return
+        }
+        if args.contains("-BNGlassDemo") {
+            // 유리 글자 + 유리펜 시연 노트 (.badnote)
+            do {
+                let url = try LibraryStore.shared.createNotebook(
+                    name: "유리 시연", cover: nil, paper: PaperSpec(template: .ruledWide, tone: .white, size: .a4Portrait),
+                    format: .badnote, in: LibraryStore.shared.root)
+                var word = PageElement(kind: .text, x: 50, y: 130, width: 500, height: 120)
+                word.text = "Liquid 유리"
+                word.fontSize = 84
+                word.bold = true
+                word.glassText = true
+                word.glassTextStrength = 0.35
+                word.textColor = RGBAColor(hex: 0x1F5FD6)
+                word.height = ElementRenderer.fittedHeight(word)
+                let points = (0...60).map { i -> PKStrokePoint in
+                    let t = CGFloat(i) / 60
+                    return PKStrokePoint(location: CGPoint(x: 60 + 460 * t, y: 360 + sin(t * .pi * 2) * 50), timeOffset: Double(i) * 0.01,
+                                         size: CGSize(width: 20, height: 20), opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)
+                }
+                let stroke = PKStroke(ink: PKInk(.monoline, color: UIColor(red: 0.85, green: 0.19, blue: 0.15, alpha: 1)),
+                                      path: PKStrokePath(controlPoints: points, creationDate: Date()), transform: .identity,
+                                      mask: nil, randomSeed: GlassInk.seed(strength: 0.4))
+                // 굴절이 잘 보이게 유리 뒤에 사진: 색 줄무늬 + 격자 + 동그라미 + 글씨
+                let photoSize = CGSize(width: 1200, height: 900)
+                let photo = UIGraphicsImageRenderer(size: photoSize).image { ctx in
+                    let cg = ctx.cgContext
+                    let colors = [UIColor.systemPink, .systemOrange, .systemYellow, .systemGreen, .systemTeal, .systemBlue, .systemPurple]
+                    for (i, color) in colors.enumerated() {
+                        color.setFill()
+                        cg.fill(CGRect(x: 0, y: CGFloat(i) * photoSize.height / 7, width: photoSize.width, height: photoSize.height / 7 + 1))
+                    }
+                    cg.setStrokeColor(UIColor.black.withAlphaComponent(0.55).cgColor)
+                    cg.setLineWidth(3)
+                    for x in stride(from: 0, through: photoSize.width, by: 40) {
+                        cg.move(to: CGPoint(x: x, y: 0)); cg.addLine(to: CGPoint(x: x, y: photoSize.height))
+                    }
+                    for y in stride(from: 0, through: photoSize.height, by: 40) {
+                        cg.move(to: CGPoint(x: 0, y: y)); cg.addLine(to: CGPoint(x: photoSize.width, y: y))
+                    }
+                    cg.strokePath()
+                    UIColor.white.setFill()
+                    for i in 0..<9 {
+                        let r: CGFloat = 50 + CGFloat(i % 3) * 20
+                        cg.fillEllipse(in: CGRect(x: CGFloat(i) * 135, y: CGFloat((i * 211) % 800), width: r, height: r))
+                    }
+                    let label = NSAttributedString(string: "REFRACTION 굴절 TEST 0123456789", attributes: [
+                        .font: UIFont.systemFont(ofSize: 70, weight: .black), .foregroundColor: UIColor.black])
+                    label.draw(at: CGPoint(x: 30, y: 380))
+                }
+                guard let prepared = ElementImages.prepare(photo.pngData() ?? Data()) else { return }
+                var picture = PageElement(kind: .image, x: 20, y: 60, width: 555, height: 416)
+                picture.imageID = prepared.id
+                _ = try PDFInkWriter.apply(content: [0: PageContent(drawing: PKDrawing(strokes: [stroke]), elements: [picture, word])],
+                                           images: [prepared.id: prepared.data], to: url)
+                await openNote(url)
+            } catch {
+                log.error("유리 시연 노트 실패: \(error.localizedDescription)")
             }
             return
         }

@@ -90,7 +90,12 @@ nonisolated struct SampledStroke: @unchecked Sendable {
     /// 그림 좌표(페이지 캔버스)에서 차지하는 영역
     let bounds: CGRect
 
-    var translucent: Bool { alpha < 0.999 || blend != .normal }
+    /// 유리펜 획이면 진하기 (0~1), 아니면 nil
+    var glassStrength: CGFloat? = nil
+    /// Apple 필기 도구로 그은 획(또는 표시 없는 예전 획): 화면에서는 Apple 렌더러로 그림
+    var appleSource: PKStroke? = nil
+
+    var translucent: Bool { alpha < 0.999 || blend != .normal || glassStrength != nil }
 
     /// 그림 좌표로 옮긴 점들 (지우개, 올가미 계산용)
     func drawingPoints(stride step: Int = 1) -> [CGPoint] {
@@ -174,7 +179,11 @@ nonisolated enum InkRenderer {
             alpha: alpha,
             blend: look.blend,
             meanWidth: points.isEmpty ? nominal : widthSum / count,
-            bounds: stroke.renderBounds.insetBy(dx: -1, dy: -1)
+            // 유리펜은 그림자·빛 테두리만큼 조금 넓게
+            bounds: stroke.renderBounds.insetBy(dx: -1 - (GlassInk.isGlass(stroke) ? nominal * 0.6 : 0),
+                                                dy: -1 - (GlassInk.isGlass(stroke) ? nominal * 0.8 : 0)),
+            glassStrength: GlassInk.isGlass(stroke) ? GlassInk.strength(stroke.randomSeed) : nil,
+            appleSource: InkOrigin.isBadNotes(stroke.randomSeed) ? nil : stroke
         )
     }
 
@@ -207,6 +216,17 @@ nonisolated enum InkRenderer {
         context.setFillColor(s.color)
         context.setLineCap(.round)
         context.setLineJoin(.round)
+
+        if let strength = s.glassStrength {
+            // 유리펜: 가운데선 → 둥근 윤곽 → 유리로 (화면은 부드러운 곡선 + 그라데이션, PDF는 직선 + 면)
+            if alphaMultiplier < 0.999 { context.setAlpha(alphaMultiplier) }
+            let line = centerline(s.points, smooth: smooth)
+            let width = s.meanWidth
+            GlassInk.draw(outline: GlassInk.outline(centerline: line, width: width), tint: s.color, strength: strength,
+                          thickness: width, forPDF: !smooth, in: context)
+            context.restoreGState()
+            return
+        }
 
         if alpha < 0.999 || s.blend != .normal {
             context.setAlpha(alpha)
@@ -338,6 +358,27 @@ nonisolated enum InkRenderer {
             context.addQuadCurve(to: CGPoint(x: (p.x + n.x) / 2, y: (p.y + n.y) / 2), control: p)
         }
         context.addLine(to: points[b].location)
+    }
+
+    /// 점들을 잇는 가운데선 (점 하나면 아주 짧은 선)
+    static func centerline(_ points: [SampledStroke.Point], smooth: Bool) -> CGPath {
+        let path = CGMutablePath()
+        guard let first = points.first else { return path }
+        path.move(to: first.location)
+        if points.count == 1 {
+            path.addLine(to: CGPoint(x: first.location.x + 0.01, y: first.location.y))
+            return path
+        }
+        if !smooth || points.count < 3 {
+            for p in points.dropFirst() { path.addLine(to: p.location) }
+            return path
+        }
+        for i in 1..<(points.count - 1) {
+            let p = points[i].location, n = points[i + 1].location
+            path.addQuadCurve(to: CGPoint(x: (p.x + n.x) / 2, y: (p.y + n.y) / 2), control: p)
+        }
+        path.addLine(to: points[points.count - 1].location)
+        return path
     }
 
     private static func quantize(_ width: CGFloat) -> CGFloat {

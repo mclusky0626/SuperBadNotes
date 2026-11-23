@@ -1,3 +1,4 @@
+import PencilKit
 //
 //  LibraryStore.swift
 //  BadNotes
@@ -107,12 +108,12 @@ final class LibraryStore {
                 let children = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey],
                                                              options: [.skipsHiddenFiles])) ?? []
                 let count = children.filter {
-                    $0.pathExtension.lowercased() == "pdf"
+                    NoteFormat.extensions.contains($0.pathExtension.lowercased())
                         || ((try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false)
                 }.count
                 return LibraryItem(url: url, name: url.lastPathComponent, modified: modified, isFolder: true, childCount: count)
             }
-            guard url.pathExtension.lowercased() == "pdf" else { return nil }
+            guard NoteFormat.extensions.contains(url.pathExtension.lowercased()) else { return nil }
             return LibraryItem(url: url, name: url.deletingPathExtension().lastPathComponent, modified: modified,
                                isFolder: false, childCount: 0)
         }
@@ -178,13 +179,40 @@ final class LibraryStore {
         return url
     }
 
-    func createNotebook(name: String, cover: CoverStyle?, paper: PaperSpec, in folder: URL) throws -> URL {
+    func createNotebook(name: String, cover: CoverStyle?, paper: PaperSpec, format: NoteFormat = .pdf,
+                        in folder: URL) throws -> URL {
         let title = cleaned(name, fallback: "이름 없는 노트북")
-        let url = uniqueURL(base: title, ext: "pdf", in: folder)
+        let url = uniqueURL(base: title, ext: format.ext, in: folder)
         try PaperRenderer.notebookPDF(name: title, cover: cover, paper: paper).write(to: url, options: .atomic)
         Log.info("노트북 만듦: \(url.lastPathComponent) (\(paper.template.title), \(paper.tone.title))")
         changed()
         return url
+    }
+
+    func createWhiteboard(name: String, format: NoteFormat = .pdf, in folder: URL) throws -> URL {
+        let title = cleaned(name, fallback: "화이트보드")
+        let url = uniqueURL(base: title, ext: format.ext, in: folder)
+        try PaperRenderer.boardPDF(name: title).write(to: url, options: .atomic)
+        Log.info("화이트보드 만듦: \(url.lastPathComponent)")
+        changed()
+        return url
+    }
+
+    /// .badnote → 다른 앱에서도 열리는 PDF 사본 (유리는 비슷한 그림으로 구워 넣음). 원본은 그대로
+    func exportPDF(_ item: LibraryItem) throws -> URL {
+        let target = uniqueURL(base: item.name, ext: "pdf", in: item.url.deletingLastPathComponent())
+        try FileManager.default.copyItem(at: item.url, to: target)
+        let loaded = try NoteLoader.load(item.url)
+        var pages: [Int: PageContent] = [:]
+        for index in Set(loaded.drawings.keys).union(loaded.elements.keys) {
+            pages[index] = PageContent(drawing: loaded.drawings[index] ?? PKDrawing(), elements: loaded.elements[index] ?? [])
+        }
+        if !pages.isEmpty {
+            _ = try PDFInkWriter.apply(content: pages, images: loaded.images, to: target)
+        }
+        Log.info("PDF로 내보냄: \(target.lastPathComponent)")
+        changed()
+        return target
     }
 
     /// 파일 앱에서 고른 PDF를 지금 폴더로 복사. 이미 서재 안에 있는 파일이면 그대로 씀
@@ -202,7 +230,7 @@ final class LibraryStore {
     func rename(_ item: LibraryItem, to newName: String) throws -> URL {
         let name = cleaned(newName, fallback: item.name)
         guard name != item.name else { return item.url }
-        let target = uniqueURL(base: name, ext: item.isFolder ? nil : "pdf", in: item.url.deletingLastPathComponent())
+        let target = uniqueURL(base: name, ext: item.isFolder ? nil : item.url.pathExtension, in: item.url.deletingLastPathComponent())
         try coordinatedMove(item.url, to: target)
         moveFavorites(from: item.url, to: target)
         changed()
@@ -213,7 +241,7 @@ final class LibraryStore {
         let from = item.url.standardizedFileURL.path, to = folder.standardizedFileURL.path
         guard to != item.url.deletingLastPathComponent().standardizedFileURL.path else { return item.url }
         if item.isFolder, to == from || to.hasPrefix(from + "/") { throw LibraryError.invalidMove }
-        let target = uniqueURL(base: item.name, ext: item.isFolder ? nil : "pdf", in: folder)
+        let target = uniqueURL(base: item.name, ext: item.isFolder ? nil : item.url.pathExtension, in: folder)
         try coordinatedMove(item.url, to: target)
         moveFavorites(from: item.url, to: target)
         changed()

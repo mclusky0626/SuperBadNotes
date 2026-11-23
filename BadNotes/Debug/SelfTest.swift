@@ -32,6 +32,15 @@ nonisolated enum SelfTest {
     }
 
     static func run() async {
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("-BNCanvasProbe") {
+            await canvasProbe()
+            return
+        }
+        if let i = args.firstIndex(of: "-BNCompare"), i + 1 < args.count {
+            await compare(args[i + 1])
+            return
+        }
         let results = Results()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("bn-selftest-\(UUID().uuidString)", isDirectory: true)
@@ -574,6 +583,62 @@ nonisolated enum SelfTest {
         return dir
     }
 
+    @MainActor
+    private static func canvasProbe() async {
+        func describe(_ d: PKDrawing) -> String {
+            d.strokes.map { "\($0.ink.inkType.rawValue) a=\(String(format: "%.2f", $0.ink.color.cgColor.alpha)) seed=\(String($0.randomSeed, radix: 16)) size=\($0.path.first?.size ?? .zero)" }
+                .joined(separator: " | ")
+        }
+        var mono = StrokeBuilder(inkType: .monoline, color: .black, width: 2.2, startTime: 0)
+        var high = StrokeBuilder(inkType: .monoline, color: UIColor.systemYellow.withAlphaComponent(0.5), width: 16, startTime: 0)
+        for i in 0...20 {
+            let sample = InputSample(location: CGPoint(x: 10 + CGFloat(i) * 5, y: 50), time: Double(i) * 0.01, force: 0.5, azimuth: 0, altitude: .pi / 2)
+            mono.add(sample)
+            high.add(InputSample(location: CGPoint(x: 10 + CGFloat(i) * 5, y: 90), time: Double(i) * 0.01, force: 0.5, azimuth: 0, altitude: .pi / 2))
+        }
+        let original = PKDrawing(strokes: [mono.makeStroke(seed: 7)!, high.makeStroke(seed: GlassInk.seed(strength: 0.4))!])
+        print("[PROBE] 원본: \(describe(original))")
+        print("[PROBE] 데이터로 왕복: \(describe((try? PKDrawing(data: original.dataRepresentation())) ?? PKDrawing()))")
+        let canvas = PKCanvasView(frame: CGRect(x: 0, y: 0, width: 400, height: 400))
+        canvas.drawing = original
+        print("[PROBE] 캔버스에 넣고 바로: \(describe(canvas.drawing))")
+        print("[PROBE] 캔버스 버전 \(canvas.maximumSupportedContentVersion.rawValue), 그림 필요 버전 \(original.requiredContentVersion.rawValue)")
+        print("[PROBE] DONE")
+    }
+
+    // MARK: 진단: 같은 필기를 PencilKit과 BadNotes 렌더러로 나란히
+
+    @MainActor
+    private static func compare(_ name: String) async {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let url = docs.appendingPathComponent(name)
+        guard let loaded = try? NoteLoader.load(url) else { print("[COMPARE] 못 엶 \(url.path)"); return }
+        for (index, drawing) in loaded.drawings.sorted(by: { $0.key < $1.key }) {
+            guard let page = loaded.pdf.page(at: index) else { continue }
+            let size = PageGeometry(page: page).canvasSize
+            for stroke in drawing.strokes {
+                let t = stroke.transform
+                print("[COMPARE] p\(index) ink=\(stroke.ink.inkType.rawValue) n=\(stroke.path.count) seed=\(String(stroke.randomSeed, radix: 16)) "
+                      + "t=(\(t.a),\(t.b),\(t.c),\(t.d),\(t.tx),\(t.ty)) mask=\(stroke.mask != nil) "
+                      + "size0=\(stroke.path.first?.size ?? .zero) bounds=\(stroke.renderBounds)")
+            }
+            let apple = drawing.image(from: CGRect(origin: .zero, size: size), scale: 1)
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            let combined = UIGraphicsImageRenderer(size: CGSize(width: size.width * 2 + 10, height: size.height), format: format).image { ctx in
+                UIColor.white.setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: size.width * 2 + 10, height: size.height))
+                apple.draw(at: .zero)
+                ctx.cgContext.translateBy(x: size.width + 10, y: 0)
+                for stroke in drawing.strokes { InkRenderer.draw(InkRenderer.sample(stroke), in: ctx.cgContext, smooth: true) }
+            }
+            let out = artifacts.appendingPathComponent("compare-p\(index).png")
+            try? combined.pngData()?.write(to: out)
+            print("[COMPARE] 그림 \(out.path)")
+        }
+        print("[COMPARE] DONE")
+    }
+
     // MARK: 텍스트 상자·메모지·사진
 
     private static func elementTests(root: URL, _ r: Results) throws {
@@ -665,6 +730,119 @@ nonisolated enum SelfTest {
                 TextFonts.available.count >= 4
                     && TextFonts.font("없는글꼴", size: 20, bold: false).pointSize == 20
                     && TextFonts.font("rounded", size: 20, bold: true).fontDescriptor.symbolicTraits.contains(.traitBold))
+
+        // 종이 메모지(색 바탕)는 유리가 아님, 예전 메모지(바탕 값 없음)는 유리
+        var paperSticky = sticky
+        paperSticky.fill = .color
+        r.check("메모지: 종이 메모지는 유리 아님, 예전 메모지는 유리",
+                !paperSticky.usesGlass && sticky.usesGlass && decodedOld?.first?.usesGlass == true)
+
+        // Liquid Glass 펜 · 유리 글자
+        let seed = GlassInk.seed(strength: 0.4)
+        r.check("유리펜: 씨앗값에 유리 표시와 진하기", GlassInk.isGlass(seed) && abs(GlassInk.strength(seed) - 0.4) < 0.01
+                    && !GlassInk.isGlass(UInt32(12345)))
+        var glassStroke = line(.monoline, .systemBlue, CGPoint(x: 40, y: 100), CGPoint(x: 180, y: 100), width: 12)
+        glassStroke = PKStroke(ink: glassStroke.ink, path: glassStroke.path, transform: .identity, mask: nil, randomSeed: seed)
+        let glassImage = renderStrokes([glassStroke], size: CGSize(width: 220, height: 200))
+        let middle = rgb(glassImage, at: CGPoint(x: 110, y: 100)), outside = rgb(glassImage, at: CGPoint(x: 110, y: 140))
+        r.check("유리펜: 비치는 색 유리로 그려짐 (속은 색, 밖은 흰색)",
+                middle.b > middle.r + 0.1 && middle.r > 0.25 && outside.r > 0.95, "\(middle)")
+        r.check("유리펜: 복제해도 유리", GlassInk.isGlass(StrokeEditing.duplicated(glassStroke, by: .zero)))
+        let glassURL = root.appendingPathComponent("Glass.pdf")
+        try makePDF(glassURL)
+        var glassWord = PageElement(kind: .text, x: 40, y: 300, width: 300, height: 80)
+        glassWord.text = "유리"
+        glassWord.fontSize = 48
+        glassWord.bold = true
+        glassWord.glassText = true
+        glassWord.textColor = RGBAColor(hex: 0xD93025)
+        _ = try PDFInkWriter.apply(content: [0: PageContent(drawing: PKDrawing(strokes: [glassStroke]), elements: [glassWord])],
+                                   images: [:], to: glassURL)
+        let glassLoaded = try NoteLoader.load(glassURL)
+        r.check("유리펜·유리 글자: PDF에 넣고 다시 읽어도 유리",
+                glassLoaded.drawings[0]?.strokes.first.map(GlassInk.isGlass) == true && glassLoaded.elements[0]?.first?.glassText == true)
+        r.check("유리 글자: 글자 윤곽이 나옴",
+                !GlyphOutline.path(text: "유리", attributes: ElementRenderer.attributes(glassWord),
+                                   in: CGRect(x: 0, y: 0, width: 300, height: 80)).isEmpty)
+        if let page = PDFDocument(url: glassURL)?.page(at: 0) {
+            let image = render(page)
+            keep(image, as: "glass.png")
+            var tinted = 0
+            for x in stride(from: 50, to: 180, by: 4) {
+                let c = rgb(image, at: CGPoint(x: CGFloat(x), y: 330))
+                if c.r > c.b + 0.08 { tinted += 1 }
+            }
+            r.check("유리 글자: 다른 앱에서도 색 유리 글자로 보임", tinted >= 3, "\(tinted)")
+            let strokeColor = rgb(image, at: CGPoint(x: 110, y: 100))
+            r.check("유리펜: 다른 앱에서도 보임", strokeColor.b > strokeColor.r + 0.05, "\(strokeColor)")
+        }
+
+        // Apple 도구로 그은 획은 BadNotes 도구 모드에서도 Apple 렌더러로 (타일, 백그라운드 스레드)
+        let appleMarker = line(.marker, .systemOrange, CGPoint(x: 20, y: 100), CGPoint(x: 200, y: 110), width: 18)
+        r.check("Apple 획 구분: 표시 없는 획은 Apple, BadNotes 획은 표시",
+                InkRenderer.sample(appleMarker).appleSource != nil
+                    && InkRenderer.sample(PKStroke(ink: appleMarker.ink, path: appleMarker.path, transform: .identity, mask: nil,
+                                                   randomSeed: InkOrigin.badNotesSeed())).appleSource == nil)
+        let tileInk = PageInk(drawing: PKDrawing(strokes: [appleMarker]))
+        let tileFormat = UIGraphicsImageRendererFormat()
+        tileFormat.scale = 1
+        let tileImage = UIGraphicsImageRenderer(size: CGSize(width: 220, height: 200), format: tileFormat).image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 220, height: 200))
+            InkTileRenderer(ink: tileInk).drawTile(in: ctx.cgContext)
+        }.cgImage
+        let appleImage = UIGraphicsImageRenderer(size: CGSize(width: 220, height: 200), format: tileFormat).image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 220, height: 200))
+            var picture: UIImage?
+            UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                picture = PKDrawing(strokes: [appleMarker]).image(from: CGRect(x: 0, y: 0, width: 220, height: 200), scale: 1)
+            }
+            picture?.draw(at: .zero)
+        }.cgImage
+        var differ = 0
+        for x in stride(from: 10, to: 210, by: 10) {
+            for y in stride(from: 80, to: 130, by: 5) {
+                let a = rgb(tileImage, at: CGPoint(x: x, y: y)), b2 = rgb(appleImage, at: CGPoint(x: x, y: y))
+                if abs(a.r - b2.r) + abs(a.g - b2.g) + abs(a.b - b2.b) > 0.06 { differ += 1 }
+            }
+        }
+        r.check("Apple 획: BadNotes 화면에서도 Apple과 똑같이 그려짐", differ == 0, "다른 점 \(differ)개")
+
+        // .badnote: BadNotes 전용 (유리 흉내 안 구움), PDF로 내보내기
+        let noteURL = root.appendingPathComponent("Glass.badnote")
+        try PaperRenderer.notebookPDF(name: "유리", cover: nil,
+                                      paper: PaperSpec(template: .blank, tone: .white, size: .a4Portrait)).write(to: noteURL)
+        _ = try PDFInkWriter.apply(content: [0: PageContent(drawing: PKDrawing(strokes: [glassStroke]), elements: [glassWord])],
+                                   images: [:], to: noteURL)
+        let noteLoaded = try NoteLoader.load(noteURL)
+        r.check(".badnote: 저장하고 다시 읽으면 유리 그대로",
+                noteLoaded.drawings[0]?.strokes.first.map(GlassInk.isGlass) == true && noteLoaded.elements[0]?.first?.glassText == true)
+        if let page = PDFDocument(data: try Data(contentsOf: noteURL))?.page(at: 0) {
+            let plain = rgb(render(page), at: CGPoint(x: 110, y: 100))
+            r.check(".badnote: 유리 흉내는 안 구움 (다른 앱에서 빈 자리)", plain.r > 0.95 && plain.b > 0.95, "\(plain)")
+        }
+        let exportItem = LibraryItem(url: noteURL, name: "Glass", modified: Date(), isFolder: false, childCount: 0)
+        let exported = try LibraryStore.shared.exportPDF(exportItem)
+        if let page = PDFDocument(url: exported)?.page(at: 0) {
+            let baked = rgb(render(page), at: CGPoint(x: 110, y: 100))
+            r.check("PDF로 내보내기: .pdf로 생기고 유리가 그림으로 구워짐",
+                    exported.pathExtension == "pdf" && baked.b > baked.r + 0.05, "\(baked)")
+        }
+        r.check("서재: .badnote도 문서로 보임",
+                LibraryStore.scan(root).contains { $0.url.lastPathComponent == "Glass.badnote" })
+
+        // 화이트보드
+        let boardURL = root.appendingPathComponent("Board.pdf")
+        try PaperRenderer.boardPDF(name: "보드").write(to: boardURL)
+        let far = PKDrawing(strokes: [line(.pen, .black, CGPoint(x: 9000, y: 9000), CGPoint(x: 9400, y: 9100), width: 4)])
+        _ = try PDFInkWriter.apply([0: far], to: boardURL)
+        let board = try NoteLoader.load(boardURL)
+        r.check("화이트보드: 아주 큰 한 장 + 화이트보드로 알아봄 + 먼 곳 필기도 저장",
+                board.pdf.pageCount == 1 && PaperSpec.isBoard(board.pdf.documentAttributes)
+                    && (board.pdf.page(at: 0)?.bounds(for: .cropBox).width ?? 0) >= 14_000
+                    && board.drawings[0]?.strokes.count == 1)
+        r.check("화이트보드: 표지는 못 넣음", (try? PDFInkWriter.replaceCover(of: boardURL, with: .navy, title: "보드")) == nil)
 
         // 페이지 줄 (가로 두 쪽)
         r.check("두 쪽: 표지는 혼자, 나머지는 둘씩",

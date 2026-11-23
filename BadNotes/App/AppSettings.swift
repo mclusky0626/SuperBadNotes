@@ -67,7 +67,13 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(twoUpLandscape, forKey: Keys.twoUpLandscape) }
     }
 
+    /// 새 노트북·화이트보드의 기본 파일 형식
+    var newFormat: NoteFormat {
+        didSet { UserDefaults.standard.set(newFormat.rawValue, forKey: Keys.newFormat) }
+    }
+
     private enum Keys {
+        static let newFormat = "newFormat"
         static let pageTurn = "pageTurn"
         static let twoUpLandscape = "twoUpLandscape"
         static let editMode = "editMode"
@@ -83,6 +89,7 @@ final class AppSettings {
         tapToUndo = defaults.object(forKey: Keys.tapToUndo) as? Bool ?? true
         straightHighlighter = defaults.object(forKey: Keys.straightHighlighter) as? Bool ?? true
         pageTurn = defaults.object(forKey: Keys.pageTurn) as? Bool ?? true
+        newFormat = NoteFormat(rawValue: defaults.string(forKey: Keys.newFormat) ?? "") ?? .pdf
         twoUpLandscape = defaults.object(forKey: Keys.twoUpLandscape) as? Bool ?? true
         #if DEBUG
         // 시뮬레이터 점검용: 마우스(손가락)로 그리기

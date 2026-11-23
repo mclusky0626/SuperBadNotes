@@ -170,6 +170,7 @@ struct LibraryFolderView: View {
                                   onRename: { renameText = item.name; renaming = item },
                                   onMove: { moving = item },
                                   onCover: { recovering = item },
+                                  onExport: { act("PDF로 내보내기") { _ = try library.exportPDF(item) } },
                                   onDelete: { deleting = item })
         if item.isFolder {
             NavigationLink(value: item.url) { content }
@@ -214,6 +215,13 @@ struct LibraryFolderView: View {
                 .accessibilityLabel("신규")
                 .popover(isPresented: $showNewMenu, arrowEdge: .top) {
                     NewMenuView(onNotebook: { afterMenu { showNewNotebook = true } },
+                                onWhiteboard: {
+                                    showNewMenu = false
+                                    act("화이트보드 만들기") {
+                                        onOpen(try library.createWhiteboard(name: "화이트보드", format: AppSettings.shared.newFormat,
+                                                                            in: folder))
+                                    }
+                                },
                                 onImport: { afterMenu { showImporter = true } },
                                 onFolder: { afterMenu { newFolderName = ""; showNewFolder = true } })
                         .presentationCompactAdaptation(.popover)
@@ -297,6 +305,7 @@ struct LibraryCard: View {
     let onRename: () -> Void
     let onMove: () -> Void
     let onCover: () -> Void
+    let onExport: () -> Void
     let onDelete: () -> Void
 
     @State private var thumbnail: UIImage?
@@ -340,7 +349,8 @@ struct LibraryCard: View {
                 }
                 .accessibilityLabel("더 보기")
             }
-            Text(item.isFolder ? "\(item.childCount)개 항목" : item.modified.libraryLabel)
+            Text(item.isFolder ? "\(item.childCount)개 항목"
+                 : item.modified.libraryLabel + (NoteFormat.of(item.url) == .badnote ? " · BadNotes 노트" : ""))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -365,6 +375,9 @@ struct LibraryCard: View {
         Button("옮기기", systemImage: "folder", action: onMove)
         if !item.isFolder {
             Button("표지 바꾸기", systemImage: "book.closed", action: onCover)
+            if NoteFormat.of(item.url) == .badnote {
+                Button("PDF로 내보내기", systemImage: "square.and.arrow.up", action: onExport)
+            }
         }
         Divider()
         Button("삭제", systemImage: "trash", role: .destructive, action: onDelete)
@@ -396,6 +409,7 @@ struct FolderIcon: View {
 struct NewMenuView: View {
     @Environment(ThemeStore.self) private var themes
     let onNotebook: () -> Void
+    let onWhiteboard: () -> Void
     let onImport: () -> Void
     let onFolder: () -> Void
 
@@ -403,8 +417,9 @@ struct NewMenuView: View {
         VStack(spacing: 12) {
             HStack(spacing: 12) {
                 tile("노트북", systemImage: "book.closed", action: onNotebook)
-                tile("PDF 불러오기", systemImage: "square.and.arrow.down", action: onImport)
+                tile("화이트보드", systemImage: "square.dashed", action: onWhiteboard)
             }
+            tile("PDF 불러오기", systemImage: "square.and.arrow.down", action: onImport)
             Button(action: onFolder) {
                 HStack(spacing: 12) {
                     Image(systemName: "folder.badge.plus")

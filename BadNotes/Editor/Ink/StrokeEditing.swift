@@ -76,7 +76,8 @@ nonisolated enum StrokeEditing {
     /// 형광펜 획인지 (BadNotes 형광펜 = 반투명 볼펜, PencilKit 형광펜 = 마커)
     static func isHighlighter(_ stroke: PKStroke) -> Bool {
         if stroke.ink.inkType == .marker { return true }
-        return stroke.ink.inkType == .monoline && stroke.ink.color.cgColor.alpha < 0.95
+        // 저장했다 열면 PencilKit이 볼펜(monoline)을 펜(pen)으로 바꿔 놓아서 둘 다 봄
+        return (stroke.ink.inkType == .monoline || stroke.ink.inkType == .pen) && stroke.ink.color.cgColor.alpha < 0.95
     }
 
     /// 픽셀 지우개로 이미 지워진(마스크 밖) 점인지
@@ -116,7 +117,10 @@ nonisolated enum StrokeEditing {
     static func duplicated(_ stroke: PKStroke, by offset: CGVector) -> PKStroke {
         PKStroke(ink: stroke.ink, path: stroke.path,
                  transform: stroke.transform.concatenating(CGAffineTransform(translationX: offset.dx, y: offset.dy)),
-                 mask: stroke.mask, randomSeed: UInt32.random(in: 1...UInt32.max))
+                 mask: stroke.mask,
+                 // 유리펜 표시는 지킴
+                 randomSeed: GlassInk.isGlass(stroke) ? GlassInk.seed(strength: Double(GlassInk.strength(stroke.randomSeed)))
+                     : (InkOrigin.isBadNotes(stroke.randomSeed) ? InkOrigin.badNotesSeed() : UInt32.random(in: 1...UInt32.max)))
     }
 
     static func recolored(_ stroke: PKStroke, to color: UIColor) -> PKStroke {

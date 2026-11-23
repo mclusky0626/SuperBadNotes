@@ -37,7 +37,7 @@ struct EditorScreen: View {
     }
 
     /// 떠 있는 막대 높이 (내용을 이만큼 비켜 둠)
-    private static let topBar: CGFloat = 62
+    private static let topBar: CGFloat = 118
     private static let bottomBar: CGFloat = 66
 
     var body: some View {
@@ -58,7 +58,8 @@ struct EditorScreen: View {
                     .contentShape(Rectangle())
                     .onTapGesture { bridge.chromeHidden = false }
             } else {
-                EditorChrome(tools: tools, bridge: bridge, mode: settings.editMode, unreadErrors: log.unreadErrors,
+                EditorChrome(tools: tools, bridge: bridge, mode: settings.editMode, isBoard: note.isBoard,
+                             unreadErrors: log.unreadErrors,
                              onClose: onClose, onAddPage: addPage,
                              onPickPhoto: { showPhotos = true }, onPickFile: { showImageFiles = true },
                              onTheme: onTheme, onSettings: onSettings, onLog: onLog)
@@ -68,7 +69,7 @@ struct EditorScreen: View {
         .overlay(alignment: .bottom) {
             if !bridge.chromeHidden {
                 VStack(spacing: 10) {
-                    if bridge.atLastPage {
+                    if bridge.atLastPage && !note.isBoard {
                         Button(action: addPage) {
                             Label("페이지 추가", systemImage: "plus")
                                 .font(.subheadline.weight(.semibold))
@@ -95,6 +96,12 @@ struct EditorScreen: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.75), value: bridge.atLastPage)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: bridge.isBook)
         .onChange(of: bridge.page) { _, page in ReadingPosition.set(page, for: note.url) }
+        .onChange(of: bridge.imageRequest) { _, _ in showPhotos = true }
+        .onChange(of: bridge.jumpRequest) { _, _ in
+            guard bridge.pageCount > 0 else { return }
+            jumpText = ""
+            showJump = true
+        }
         .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .images)
         .onChange(of: photoItem) { _, item in
             guard let item else { return }

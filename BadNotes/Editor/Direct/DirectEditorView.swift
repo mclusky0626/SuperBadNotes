@@ -36,12 +36,16 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     /// 키보드가 가린 높이 (그만큼 아래 여백을 더 줌)
     private var keyboardOverlap: CGFloat = 0
     private var editingEndedAt: CFTimeInterval = 0
+    /// 이미지 도구로 누른 자리 (사진을 고르면 거기에)
+    private var pendingImage: (page: Int, point: CGPoint)?
 
     // 페이지 보기: 줄(가로면 두 쪽씩) + 책처럼 넘기기
     private var rows: [[Int]] = []
     private var currentRow = 0
     private var bookMode = AppSettings.shared.pageTurn
     private var twoUp = AppSettings.shared.twoUpLandscape
+    /// 화이트보드: 지금 확대 배율을 다시 배치할 때도 지킴
+    private var boardZoom: CGFloat = 1
     private var fitZoom: CGFloat = 1
     private var turning = false
     private let swipeNext = UISwipeGestureRecognizer()
@@ -95,10 +99,12 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         let pdf = document.pdf
         elements.host = self
         elements.tools = tools
+        if document.isBoard { bookMode = false }
         for index in 0..<pdf.pageCount {
             let page = pdf.page(at: index) ?? PDFPage()
             let view = PageView(index: index, page: page, size: PageGeometry(page: page).canvasSize,
-                                ink: PageInk(drawing: document.drawing(for: index)), documentLock: document.renderLock)
+                                ink: PageInk(drawing: document.drawing(for: index)), documentLock: document.renderLock,
+                                board: document.isBoard)
             pageViews.append(view)
             contentView.addSubview(view)
             elements.refresh(view)
@@ -163,6 +169,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         bridge.pageAddedAction = { [weak self] page in self?.pageAdded(page) }
         bridge.insertAction = { [weak self] what in self?.insert(what) }
         bridge.turnAction = { [weak self] delta in self?.turn(by: delta) }
+        bridge.restyleAction = { [weak self] in self?.elements.restyleFromTools() }
         setFingerDrawing(false)
     }
 
@@ -177,7 +184,8 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         currentTool = tool
         if tool != .lasso { clearSelection() }
         if tool != .eraser { wetView.setEraser(center: nil, radius: 0, page: nil) }
-        elements.endEditing()
+        // 글상자를 고치는 중에 텍스트·메모지 도구로 바뀌는 건 그 상자를 보여 주려는 것이라 그대로 둠
+        if tool != .text && tool != .sticky { elements.endEditing() }
     }
 
     private var currentTool: InkToolState.Tool?
@@ -194,6 +202,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     /// 설정의 페이지 보기가 바뀌면 지금 페이지를 지키며 다시 배치
     func setPageView(book: Bool, twoUp newTwoUp: Bool) {
+        guard !document.isBoard else { return }
         guard book != bookMode || newTwoUp != twoUp else { return }
         let keep = bridge.page
         bookMode = book
@@ -233,11 +242,15 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
                                                                          coverAlone: document.hasCover))
         layoutPages()
         if didInitialScroll {
-            scroll(toPage: keepPage, animated: false)
+            if !document.isBoard { scroll(toPage: keepPage, animated: false) }
         } else {
             didInitialScroll = true
             scrollView.contentOffset = CGPoint(x: -scrollView.contentInset.left, y: -scrollView.contentInset.top)
-            if initialPage > 0 { scroll(toPage: initialPage, animated: false) }
+            if document.isBoard {
+                centerBoard()
+            } else if initialPage > 0 {
+                scroll(toPage: initialPage, animated: false)
+            }
             updateCurrentPage()
             #if DEBUG
             runDemoIfRequested()
@@ -248,6 +261,10 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     /// 페이지를 원래 크기(pt)로 줄(한 쪽 / 두 쪽)마다 놓고 확대 배율을 정함.
     /// 세로 보기: 줄을 위아래로 쌓아 폭에 맞춤. 책 보기: 지금 줄만 보이고 화면 안에 다 들어오게
     private func layoutPages() {
+        if document.isBoard {
+            layoutBoard()
+            return
+        }
         rows = PageRows.make(count: pageViews.count, twoUp: useTwoUp, coverAlone: document.hasCover)
         currentRow = min(max(currentRow, 0), max(0, rows.count - 1))
         let maxWidth = pageViews.map(\.bounds.width).max() ?? 1
@@ -303,6 +320,37 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         if bookMode {
             scrollView.contentOffset = CGPoint(x: -scrollView.contentInset.left, y: -scrollView.contentInset.top)
         }
+    }
+
+    /// 화이트보드: 한 장을 원래 크기로 두고 1배에서 시작. 아주 멀리(0.12배)까지 멀어지고 6배까지 가까이
+    private func layoutBoard() {
+        rows = [[0]]
+        currentRow = 0
+        guard let board = pageViews.first else { return }
+        if scrollView.zoomScale > 0.0001, didInitialScroll { boardZoom = scrollView.zoomScale }
+        board.isHidden = false
+        board.frame.origin = .zero
+        scrollView.minimumZoomScale = 0.01
+        scrollView.maximumZoomScale = 100
+        scrollView.zoomScale = 1
+        contentView.frame = CGRect(origin: .zero, size: board.bounds.size)
+        scrollView.contentSize = board.bounds.size
+        fitZoom = 1
+        scrollView.minimumZoomScale = 0.12
+        scrollView.maximumZoomScale = 6
+        scrollView.zoomScale = boardZoom
+        updateInsets()
+    }
+
+    /// 화이트보드를 처음 열 때: 쓴 게 있으면 그 가운데, 없으면 판 한가운데
+    private func centerBoard() {
+        guard let board = pageViews.first else { return }
+        let target = document.contentBounds(page: 0) ?? CGRect(x: board.bounds.midX - 400, y: board.bounds.midY - 300,
+                                                                 width: 800, height: 600)
+        let zoom = scrollView.zoomScale
+        let visible = scrollView.bounds.inset(by: scrollView.adjustedContentInset)
+        scrollView.contentOffset = CGPoint(x: target.midX * zoom - visible.width / 2 - scrollView.adjustedContentInset.left,
+                                           y: target.midY * zoom - visible.height / 2 - scrollView.adjustedContentInset.top)
     }
 
     /// 내용이 화면보다 좁으면 가운데로. 책 보기는 위아래도 가운데
@@ -468,7 +516,8 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     func pageAdded(_ index: Int) {
         guard index == pageViews.count, let page = document.pdf.page(at: index) else { return }
         let view = PageView(index: index, page: page, size: PageGeometry(page: page).canvasSize,
-                            ink: PageInk(drawing: document.drawing(for: index)), documentLock: document.renderLock)
+                            ink: PageInk(drawing: document.drawing(for: index)), documentLock: document.renderLock,
+                                board: document.isBoard)
         pageViews.append(view)
         contentView.addSubview(view)
         elements.refresh(view)
@@ -544,10 +593,11 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             // 다른 데를 누르면 글 입력만 끝냄 (그 탭으로 새 글상자를 또 만들지 않게)
             elements.endEditing()
             editingEndedAt = CACurrentMediaTime()
-            if tools.tool == .text { return false }
+            if tools.tool.places { return false }
         }
         // 텍스트 도구는 탭으로, 고른 요소를 잡은 펜슬은 끌기로
-        if tools.tool == .text { return false }
+        // 텍스트·메모지·이미지 도구는 탭으로 놓음
+        if tools.tool.places { return false }
         // 고른 요소를 잡으면 옮기기 (손가락은 늘, 펜슬은 올가미일 때)
         if touch.type != .pencil || tools.tool == .lasso, elements.grabs(location, page: pageView.index) { return false }
         // 다른 데 쓰기 시작하면 고른 요소는 놓아 줌
@@ -555,7 +605,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         editMenu?.dismissMenu()
 
         switch tools.tool {
-        case .text:
+        case .text, .sticky, .image:
             return false
         case .pen, .highlighter:
             clearSelection()
@@ -565,7 +615,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             for sample in samples(touch, event, in: pageView) { newBuilder.add(sample) }
             builder = newBuilder
             action = .drawing(pageView)
-            wetView.setActive(newBuilder.makeStroke(seed: 1), page: pageView)
+            wetView.setActive(newBuilder.makeStroke(seed: tools.strokeSeed(preview: true)), page: pageView)
 
         case .eraser:
             clearSelection()
@@ -601,7 +651,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             guard builder != nil else { return }
             for sample in samples(touch, event, in: pageView) { builder?.add(sample) }
             let predicted = samples(touch, event, in: pageView, predicted: true)
-            wetView.setActive(builder?.makeStroke(predicted: predicted, seed: 1), page: pageView)
+            wetView.setActive(builder?.makeStroke(predicted: predicted, seed: tools.strokeSeed(preview: true)), page: pageView)
 
         case .erasing(let pageView, let before, var last):
             for sample in samples(touch, event, in: pageView) {
@@ -640,7 +690,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
                let straight = finalBuilder.straightened() {
                 finalBuilder = straight
             }
-            guard let stroke = finalBuilder.makeStroke() else { return }
+            guard let stroke = finalBuilder.makeStroke(seed: tools.strokeSeed(preview: false)) else { return }
             let before = pageView.ink.currentDrawing()
             var after = before
             after.strokes.append(stroke)
@@ -911,10 +961,10 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         if gestureRecognizer === elementTap {
             // 펜슬은 텍스트 도구일 때만 (나머지 도구에서는 필기)
-            if touch.type == .pencil { return tools.tool == .text }
+            if touch.type == .pencil { return tools.tool.places }
             // 손가락 필기를 켰으면 손가락도 필기 → 텍스트·올가미 도구에서만, 또는 고른 요소를 다시 누를 때
             if AppSettings.shared.fingerDrawing {
-                return tools.tool == .text || tools.tool == .lasso || elementAt(touch)?.id == elements.selected?.id
+                return tools.tool.places || tools.tool == .lasso || elementAt(touch)?.id == elements.selected?.id
             }
             return true
         }
@@ -957,11 +1007,25 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             }
             return
         }
-        if tools.tool == .text {
+        switch tools.tool {
+        case .text:
             clearSelection()
             elements.clearSelection()
             elements.insertText(at: point, page: pageView.index, pageSize: pageView.bounds.size, fill: tools.textFill)
             return
+        case .sticky:
+            clearSelection()
+            elements.clearSelection()
+            elements.insertSticky(center: point, page: pageView.index, pageSize: pageView.bounds.size)
+            return
+        case .image:
+            // 누른 자리에 넣을 사진을 고르게 함
+            elements.clearSelection()
+            pendingImage = (pageView.index, point)
+            bridge.imageRequest += 1
+            return
+        default:
+            break
         }
         if elements.selected != nil { elements.clearSelection() }
     }
@@ -995,12 +1059,18 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     private func insert(_ what: EditorBridge.Insert) {
         clearSelection()
         elements.clearSelection()
-        let index = min(max(bridge.page, 0), pageViews.count - 1)
+        var index = min(max(bridge.page, 0), pageViews.count - 1)
         guard pageViews.indices.contains(index) else { return }
-        let pageView = pageViews[index]
+        var pageView = pageViews[index]
         let visible = scrollView.bounds.inset(by: scrollView.adjustedContentInset)
         let area = scrollView.convert(visible, to: pageView).intersection(pageView.bounds)
-        let center = area.isNull ? CGPoint(x: pageView.bounds.midX, y: pageView.bounds.midY) : CGPoint(x: area.midX, y: area.midY)
+        var center = area.isNull ? CGPoint(x: pageView.bounds.midX, y: pageView.bounds.midY) : CGPoint(x: area.midX, y: area.midY)
+        if case .image = what, let pending = pendingImage, pageViews.indices.contains(pending.page) {
+            index = pending.page
+            pageView = pageViews[index]
+            center = pending.point
+        }
+        pendingImage = nil
         let size = pageView.bounds.size
         switch what {
         case .text(let fill):

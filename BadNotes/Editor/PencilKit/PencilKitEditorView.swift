@@ -41,6 +41,7 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     private let elementTap = UITapGestureRecognizer()
     private let elementPan = UIPanGestureRecognizer()
     private let fallbackUndo = UndoManager()
+    private var pendingImage: (page: Int, point: CGPoint)?
 
     var initialPage = 0
     var chromeInsets: UIEdgeInsets = .zero {
@@ -72,7 +73,8 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
         for index in 0..<pdf.pageCount {
             let page = pdf.page(at: index) ?? PDFPage()
             let view = PageView(index: index, page: page, size: PageGeometry(page: page).canvasSize,
-                                ink: PageInk(drawing: PKDrawing()), documentLock: document.renderLock, showsInk: false)
+                                ink: PageInk(drawing: PKDrawing()), documentLock: document.renderLock, showsInk: false,
+                                board: document.isBoard)
             pageViews.append(view)
             pagesView.addSubview(view)
             elements.refresh(view)
@@ -118,6 +120,7 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
         bridge.jumpAction = { [weak self] page in self?.scroll(toPage: page, animated: true) }
         bridge.pageAddedAction = { [weak self] page in self?.pageAdded(page) }
         bridge.insertAction = { [weak self] what in self?.insert(what) }
+        bridge.restyleAction = { [weak self] in self?.elements.restyleFromTools() }
         setFingerDrawing(AppSettings.shared.fingerDrawing)
     }
 
@@ -176,7 +179,15 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
             didInitialScroll = true
             loadDrawing()
             canvas.contentOffset = CGPoint(x: -canvas.contentInset.left, y: -canvas.contentInset.top)
-            if initialPage > 0 { scroll(toPage: initialPage, animated: false) }
+            if document.isBoard, let board = pageViews.first {
+                let target = document.contentBounds(page: 0)
+                    ?? CGRect(x: board.bounds.midX - 400, y: board.bounds.midY - 300, width: 800, height: 600)
+                let zoom = canvas.zoomScale, origin = pageOrigins.first ?? .zero
+                canvas.contentOffset = CGPoint(x: (origin.x + target.midX) * zoom - canvas.bounds.width / 2,
+                                               y: (origin.y + target.midY) * zoom - canvas.bounds.height / 2)
+            } else if initialPage > 0 {
+                scroll(toPage: initialPage, animated: false)
+            }
         }
     }
 
@@ -210,10 +221,17 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
         natural = CGSize(width: contentWidth + gap * 2, height: y)
         pagesView.bounds = CGRect(origin: .zero, size: natural)
 
-        let fit = bounds.width / natural.width
-        canvas.minimumZoomScale = fit * 0.5
-        canvas.maximumZoomScale = fit * 8
-        if resetZoom { canvas.zoomScale = fit }
+        if document.isBoard {
+            // 화이트보드: 1배에서 시작, 멀리 0.12배 ~ 가까이 6배
+            canvas.minimumZoomScale = 0.12
+            canvas.maximumZoomScale = 6
+            if resetZoom && !didInitialScroll { canvas.zoomScale = 1 }
+        } else {
+            let fit = bounds.width / natural.width
+            canvas.minimumZoomScale = fit * 0.5
+            canvas.maximumZoomScale = fit * 8
+            if resetZoom { canvas.zoomScale = fit }
+        }
         syncUnderlay()
         if moved { loadDrawing() }
     }
@@ -249,7 +267,8 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     func pageAdded(_ index: Int) {
         guard index == pageViews.count, let page = document.pdf.page(at: index) else { return }
         let view = PageView(index: index, page: page, size: PageGeometry(page: page).canvasSize,
-                            ink: PageInk(drawing: PKDrawing()), documentLock: document.renderLock, showsInk: false)
+                            ink: PageInk(drawing: PKDrawing()), documentLock: document.renderLock, showsInk: false,
+                                board: document.isBoard)
         pageViews.append(view)
         pagesView.addSubview(view)
         elements.refresh(view)
@@ -458,8 +477,21 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
             } else {
                 elements.select(hit.id, page: pageView.index)
             }
-        } else if elements.selected != nil {
+            return
+        }
+        switch InkToolState.shared.tool {
+        case .text:
             elements.clearSelection()
+            elements.insertText(at: point, page: pageView.index, pageSize: pageView.bounds.size, fill: InkToolState.shared.textFill)
+        case .sticky:
+            elements.clearSelection()
+            elements.insertSticky(center: point, page: pageView.index, pageSize: pageView.bounds.size)
+        case .image:
+            elements.clearSelection()
+            pendingImage = (pageView.index, point)
+            bridge.imageRequest += 1
+        default:
+            if elements.selected != nil { elements.clearSelection() }
         }
     }
 
@@ -488,12 +520,18 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
 
     private func insert(_ what: EditorBridge.Insert) {
         elements.clearSelection()
-        let index = min(max(bridge.page, 0), pageViews.count - 1)
+        var index = min(max(bridge.page, 0), pageViews.count - 1)
         guard pageViews.indices.contains(index) else { return }
-        let pageView = pageViews[index]
+        var pageView = pageViews[index]
         let visible = canvas.bounds.inset(by: canvas.adjustedContentInset)
         let area = canvas.convert(visible, to: pageView).intersection(pageView.bounds)
-        let center = area.isNull ? CGPoint(x: pageView.bounds.midX, y: pageView.bounds.midY) : CGPoint(x: area.midX, y: area.midY)
+        var center = area.isNull ? CGPoint(x: pageView.bounds.midX, y: pageView.bounds.midY) : CGPoint(x: area.midX, y: area.midY)
+        if case .image = what, let pending = pendingImage, pageViews.indices.contains(pending.page) {
+            index = pending.page
+            pageView = pageViews[index]
+            center = pending.point
+        }
+        pendingImage = nil
         let size = pageView.bounds.size
         switch what {
         case .text(let fill):

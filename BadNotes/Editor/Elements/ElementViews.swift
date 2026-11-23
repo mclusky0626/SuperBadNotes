@@ -32,6 +32,8 @@ final class ElementView: UIView {
     private(set) var element: PageElement
     private var image: CGImage?
     private var glass: UIVisualEffectView?
+    /// 유리 글자: 글자 모양으로 오려 낸 진짜 유리
+    private var glyphGlass: GlassShapeHost?
     private var tiles: TiledView?
     private(set) var textView: UITextView?
 
@@ -111,6 +113,29 @@ final class ElementView: UIView {
             glass = nil
         }
 
+        // 종이 메모지는 종이처럼 살짝 뜬 그림자
+        if element.kind == .sticky && !element.usesGlass {
+            layer.shadowColor = UIColor.black.cgColor
+            layer.shadowOpacity = 0.18
+            layer.shadowRadius = 6
+            layer.shadowOffset = CGSize(width: 0, height: 3)
+            layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: element.cornerRadius).cgPath
+        } else {
+            layer.shadowOpacity = 0
+        }
+
+        glyphGlass?.removeFromSuperview()
+        glyphGlass = nil
+        if element.glassText, element.hasText, !element.text.isEmpty, size.width >= 1, size.height >= 1 {
+            // 진짜 Liquid Glass를 글자 모양으로 (타일에는 유리 글자를 안 그림)
+            let inner = CGRect(origin: .zero, size: size).insetBy(dx: element.padding.width, dy: element.padding.height)
+            let outline = GlyphOutline.path(text: element.text, attributes: ElementRenderer.attributes(element), in: inner)
+            let view = GlassShapeHost(path: outline, tint: element.textColor.uiColor.withAlphaComponent(1),
+                                      strength: element.glassTextStrength, frame: CGRect(origin: .zero, size: size))
+            addSubview(view)
+            glyphGlass = view
+        }
+
         guard size.width >= 1, size.height >= 1 else { return }
         let view = TiledView(frame: CGRect(origin: .zero, size: size),
                              renderer: ElementTileRenderer(element: element, image: image))
@@ -142,6 +167,7 @@ final class ElementView: UIView {
         addSubview(view)
         textView = view
         tiles?.isHidden = true
+        glyphGlass?.isHidden = true
         isUserInteractionEnabled = true
         setRenderScale(renderScale)
         return view
@@ -166,6 +192,33 @@ final class ElementView: UIView {
             for sub in view.subviews { apply(sub) }
         }
         apply(textView)
+    }
+
+    /// 고치는 중에 도구 막대에서 모양을 바꿈: 바탕(유리)과 글자 모양을 바로 바꿔 보여 줌
+    func restyleEditing(_ new: PageElement, image: CGImage?) {
+        let typed = textView?.text ?? new.text
+        element = new
+        element.text = typed
+        frame = new.frame
+        let editingView = textView
+        textView = nil
+        rebuild()
+        textView = editingView
+        tiles?.isHidden = true
+        glyphGlass?.isHidden = true
+        if let editingView {
+            editingView.frame = bounds
+            bringSubviewToFront(editingView)
+            editingView.textContainerInset = UIEdgeInsets(top: new.padding.height, left: new.padding.width,
+                                                          bottom: new.padding.height, right: new.padding.width)
+            editingView.font = ElementRenderer.font(new)
+            editingView.textColor = new.textColor.uiColor.withAlphaComponent(1)
+            editingView.textAlignment = [.left, .center, .right][min(max(new.alignment, 0), 2)]
+            editingView.typingAttributes = ElementRenderer.attributes(new)
+            let selection = editingView.selectedRange
+            editingView.attributedText = NSAttributedString(string: typed, attributes: ElementRenderer.attributes(new))
+            editingView.selectedRange = selection
+        }
     }
 
     /// 고치는 중 글자가 늘면 상자 높이를 맞춤

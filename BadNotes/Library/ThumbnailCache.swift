@@ -31,13 +31,65 @@ actor ThumbnailCache {
             return image
         }
 
-        guard let document = PDFDocument(url: url), let page = document.page(at: 0),
-              let image = Self.render(page, maxPixel: maxPixel) else { return nil }
+        // 확장자가 .badnote여도 속은 PDF라서 데이터로 엶
+        guard let data = try? Data(contentsOf: url, options: .alwaysMapped), let document = PDFDocument(data: data),
+              let page = document.page(at: 0) else { return nil }
+        let board = PaperSpec.isBoard(document.documentAttributes)
+        guard let image = board ? Self.renderBoard(page, maxPixel: maxPixel) : Self.render(page, maxPixel: maxPixel) else {
+            return nil
+        }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         // 손실 없는 PNG (JPEG는 글자·선 둘레가 뭉개짐)
         try? image.pngData()?.write(to: file, options: .atomic)
         remember(image, key)
         return image
+    }
+
+    /// 화이트보드는 판 전체가 아니라 쓴 곳 둘레만 (세로 카드 비율로)
+    private static func renderBoard(_ page: PDFPage, maxPixel: CGFloat) -> UIImage? {
+        let box = page.bounds(for: .cropBox)
+        var content = page.annotations.reduce(CGRect.null) { $0.union($1.bounds) }
+        if content.isNull || content.isEmpty {
+            content = CGRect(x: box.midX - 450, y: box.midY - 600, width: 900, height: 1200)
+        }
+        // 카드 비율(3:4)로 넓히고 여백
+        var region = content.insetBy(dx: -100, dy: -100)
+        let ratio: CGFloat = 0.75
+        if region.width / region.height > ratio {
+            let h = region.width / ratio
+            region = region.insetBy(dx: 0, dy: -(h - region.height) / 2)
+        } else {
+            let w = region.height * ratio
+            region = region.insetBy(dx: -(w - region.width) / 2, dy: 0)
+        }
+        let scale = maxPixel / max(region.width, region.height)
+        let pixels = CGSize(width: (region.width * scale).rounded(), height: (region.height * scale).rounded())
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: pixels, format: format).image { context in
+            let cg = context.cgContext
+            cg.setFillColor(UIColor(red: 0.985, green: 0.983, blue: 0.975, alpha: 1).cgColor)
+            cg.fill(CGRect(origin: .zero, size: pixels))
+            // 점 무늬
+            cg.setFillColor(UIColor(white: 0.75, alpha: 1).cgColor)
+            let step = 32 * scale
+            if step >= 5 {
+                var y = (32 - region.minY.truncatingRemainder(dividingBy: 32)) * scale
+                while y < pixels.height {
+                    var x = (32 - region.minX.truncatingRemainder(dividingBy: 32)) * scale
+                    while x < pixels.width {
+                        cg.fillEllipse(in: CGRect(x: x - 1, y: y - 1, width: 2, height: 2))
+                        x += step
+                    }
+                    y += step
+                }
+            }
+            cg.translateBy(x: 0, y: pixels.height)
+            cg.scaleBy(x: scale, y: -scale)
+            cg.translateBy(x: -region.minX, y: -region.minY)
+            page.draw(with: .cropBox, to: cg)
+        }
     }
 
     /// 화면 픽셀 그대로 직접 그림 (PDFKit 썸네일은 배율이 들쭉날쭉하고 흐림)

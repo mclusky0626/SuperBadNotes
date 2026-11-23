@@ -61,6 +61,16 @@ struct SettingsView: View {
                     Text("책처럼 넘기기를 켜면 한 장씩 보이고, 옆으로 쓸거나 아래 ‹ › 를 누르면 종이를 넘기듯 넘어가요. 끄면 세로로 이어서 스크롤해요. 가로 화면에서는 두 쪽이 양옆으로 펼쳐져요. (책처럼 넘기기는 BadNotes 필기 도구에서만)")
                 }
 
+                Section {
+                    Picker("새 문서 형식", selection: $settings.newFormat) {
+                        ForEach(NoteFormat.allCases) { Text($0.title).tag($0) }
+                    }
+                } header: {
+                    Text("파일 형식")
+                } footer: {
+                    Text(settings.newFormat.detail + " 새 노트북을 만들 때마다 따로 고를 수도 있어요. 화이트보드는 이 형식으로 만들어요.")
+                }
+
                 Section("모양") {
                     Button("테마 바꾸기…", action: openTheme)
                 }

@@ -150,18 +150,23 @@ final class ElementController: NSObject, UITextViewDelegate {
     // MARK: 만들기
 
     /// 텍스트 상자: 누른 자리(왼쪽 위)에 만들고 바로 글자 입력
+    /// 텍스트 상자: 누른 자리(왼쪽 가운데)에 만들고 바로 글자 입력. 모양은 텍스트 도구 막대 설정
     func insertText(at point: CGPoint, page: Int, pageSize: CGSize, fill: PageElement.Fill) {
-        let tools = tools
         var element = PageElement(kind: .text, x: 0, y: 0, width: min(340, pageSize.width * 0.6), height: 40)
         element.fill = fill
-        element.fontSize = tools?.textSize ?? 20
-        element.font = tools?.textFont ?? "system"
-        // 글자 색 = 지금 고른 펜 색 (색 바탕이면 바탕에 맞춰 검정)
+        if let tools {
+            element.fontSize = tools.textSize
+            element.font = tools.textFont
+            element.textColor = tools.textColor
+            element.bold = tools.textBold
+            element.alignment = tools.textAlignment
+            element.glassClear = tools.textGlassClear
+            element.glassText = tools.textGlass
+            element.glassTextStrength = tools.textGlassStrength
+        }
         if fill == .color {
             element.fillColor = PageElement.fillColors[0].1
-            element.textColor = RGBAColor(hex: 0x1C1C1E)
-        } else if let tools {
-            element.textColor = tools.penColors[min(max(tools.penColorIndex, 0), tools.penColors.count - 1)]
+            if element.textColor.isLight { element.textColor = RGBAColor(hex: 0x1C1C1E) }
         }
         element.height = ElementRenderer.fittedHeight(element)
         element.x = min(max(4, point.x - 6), max(4, pageSize.width - element.width - 4))
@@ -169,13 +174,18 @@ final class ElementController: NSObject, UITextViewDelegate {
         place(element, page: page, edit: true, name: "텍스트 상자")
     }
 
-    /// 유리 메모지: 가운데에 놓고 바로 글자 입력
+    /// 메모지: 누른 자리(가운데)에 놓고 바로 글자 입력. 색·유리 여부는 메모지 도구 막대 설정
     func insertSticky(center: CGPoint, page: Int, pageSize: CGSize) {
         let side = min(240, pageSize.width * 0.42)
         var element = PageElement(kind: .sticky, x: 0, y: 0, width: side, height: side)
         element.fontSize = 22
-        element.font = tools?.textFont ?? "system"
-        element.fillColor = PageElement.stickyColors[0].1
+        if let tools {
+            element.font = tools.textFont
+            element.fillColor = tools.stickyColor
+            element.fill = tools.stickyGlass ? .glass : .color
+            element.glassClear = tools.stickyGlassClear
+            element.glassTint = tools.stickyGlass ? (tools.stickyColor.a < 0.01 ? 0 : 0.5) : 0
+        }
         element.height = ElementRenderer.fittedHeight(element)
         element.x = min(max(4, center.x - side / 2), max(4, pageSize.width - side - 4))
         element.y = min(max(4, center.y - element.height / 2), max(4, pageSize.height - element.height - 4))
@@ -184,13 +194,57 @@ final class ElementController: NSObject, UITextViewDelegate {
 
     func insertImage(id: String, size: CGSize, center: CGPoint, page: Int, pageSize: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
-        let scale = min(pageSize.width * 0.6 / size.width, pageSize.height * 0.5 / size.height, 1)
+        // 페이지 폭의 60%, 높이의 50%, 그리고 화이트보드처럼 큰 판에서도 너무 크지 않게 긴 변 520pt까지
+        let scale = min(pageSize.width * 0.6 / size.width, pageSize.height * 0.5 / size.height, 520 / max(size.width, size.height), 1)
         let w = max(40, size.width * scale), h = max(40, size.height * scale)
         var element = PageElement(kind: .image, x: center.x - w / 2, y: center.y - h / 2, width: w, height: h)
         element.imageID = id
         element.x = min(max(4, element.x), max(4, pageSize.width - w - 4))
         element.y = min(max(4, element.y), max(4, pageSize.height - h - 4))
         place(element, page: page, edit: false, name: "사진")
+    }
+
+    /// 도구 막대에서 글자·메모지 모양을 바꾸면 지금 고른(고치는) 상자에도 바로 적용
+    func restyleFromTools() {
+        guard let tools, let selected, let element = selectedElement else { return }
+        var updated = element
+        switch element.kind {
+        case .text:
+            updated.font = tools.textFont
+            updated.fontSize = tools.textSize
+            updated.textColor = tools.textColor
+            updated.bold = tools.textBold
+            updated.alignment = tools.textAlignment
+            updated.glassText = tools.textGlass
+            if tools.textGlass { updated.glassTextStrength = tools.textGlassStrength }
+            updated.fill = tools.textFill
+            if tools.textFill == .glass { updated.glassClear = tools.textGlassClear }
+            if tools.textFill == .color && updated.fillColor.a < 0.01 { updated.fillColor = PageElement.fillColors[0].1 }
+        case .sticky:
+            updated.fillColor = tools.stickyColor
+            updated.fill = tools.stickyGlass ? .glass : .color
+            updated.glassClear = tools.stickyGlassClear
+            if tools.stickyGlass && updated.glassTint < 0.01 && tools.stickyColor.a > 0.01 { updated.glassTint = 0.5 }
+        case .image:
+            return
+        }
+        guard updated != element else { return }
+        if updated.hasText {
+            let fitted = ElementRenderer.fittedHeight(updated)
+            updated.height = updated.kind == .sticky ? max(fitted, updated.height) : fitted
+        }
+        var list = elements(selected.page)
+        guard let index = list.firstIndex(where: { $0.id == selected.id }) else { return }
+        list[index] = updated
+        if let editing, editing.id == selected.id, let view = host?.elementPageView(selected.page)?.elementView(selected.id) {
+            // 고치는 중: 실행 취소는 입력을 끝낼 때 한 번에. 화면만 바로 바꿈
+            host?.elementDocument.updateElements(list, page: selected.page)
+            view.restyleEditing(updated, image: nil)
+            updateSelectionFrame()
+        } else {
+            commit(list, previous: elements(selected.page), page: selected.page, name: "모양")
+            updateSelectionFrame()
+        }
     }
 
     private func place(_ element: PageElement, page: Int, edit: Bool, name: String) {
@@ -275,6 +329,8 @@ final class ElementController: NSObject, UITextViewDelegate {
         if isEditing { return }
         editing = Editing(page: selected.page, id: selected.id, before: before ?? elements(selected.page), name: name)
         host.elementHideMenu()
+        // 도구 막대가 이 상자의 글꼴·색·유리 설정을 보여 줌
+        tools?.adopt(element)
         let textView = view.beginEditing(delegate: self, renderScale: renderScale)
         updateSelectionFrame()
         textView.becomeFirstResponder()
@@ -450,6 +506,19 @@ final class ElementController: NSObject, UITextViewDelegate {
                 UIAction(title: "굵게", image: UIImage(systemName: "bold"), state: element.bold ? .on : .off) { [weak self] _ in
                     self?.change("굵게") { $0.bold.toggle() }
                 },
+                UIAction(title: "유리 글자 (Liquid Glass)", image: UIImage(systemName: "drop.halffull"),
+                         state: element.glassText ? .on : .off) { [weak self] _ in
+                    self?.change("유리 글자") { $0.glassText.toggle() }
+                },
+                UIMenu(title: "유리 글자 진하기", image: UIImage(systemName: "circle.lefthalf.filled"), children:
+                    [("투명하게", 0.1), ("맑게", 0.25), ("보통", 0.4), ("진하게", 0.65), ("아주 진하게", 0.9)].map { name, value in
+                        UIAction(title: name, state: element.glassText && abs(element.glassTextStrength - value) < 0.01 ? .on : .off) { [weak self] _ in
+                            self?.change("유리 글자 진하기") {
+                                $0.glassText = true
+                                $0.glassTextStrength = value
+                            }
+                        }
+                    }),
                 UIMenu(title: "정렬", children: [("왼쪽", "text.alignleft"), ("가운데", "text.aligncenter"), ("오른쪽", "text.alignright")]
                     .enumerated().map { index, item in
                         UIAction(title: item.0, image: UIImage(systemName: item.1), state: element.alignment == index ? .on : .off) { [weak self] _ in

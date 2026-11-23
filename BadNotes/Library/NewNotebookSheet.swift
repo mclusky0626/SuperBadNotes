@@ -23,6 +23,7 @@ struct NewNotebookSheet: View {
     @State private var template: PaperSpec.Template = .ruledWide
     @State private var tone: PaperSpec.Tone = .yellow
     @State private var size: PaperSpec.Size = .a4Portrait
+    @State private var format = AppSettings.shared.newFormat
     @State private var part: Part = .paper
 
     enum Part {
@@ -117,6 +118,22 @@ struct NewNotebookSheet: View {
                 TextField("이름 없는 노트북", text: $name)
                     .multilineTextAlignment(.trailing)
             }
+            Divider()
+            row {
+                Text("형식")
+                Spacer()
+                Picker("형식", selection: $format) {
+                    Text("PDF").tag(NoteFormat.pdf)
+                    Text("BadNotes 노트 (.badnote)").tag(NoteFormat.badnote)
+                }
+                .pickerStyle(.menu)
+            }
+            Text(format.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 8)
+                .animation(.easeInOut(duration: 0.2), value: format)
             Divider()
             row { Toggle("표지", isOn: $hasCover) }
             Divider()
@@ -222,7 +239,7 @@ struct NewNotebookSheet: View {
     private func create() {
         do {
             let url = try LibraryStore.shared.createNotebook(name: name, cover: hasCover ? cover : nil,
-                                                             paper: paper, in: folder)
+                                                             paper: paper, format: format, in: folder)
             dismiss()
             onCreated(url)
         } catch {
@@ -325,7 +342,8 @@ struct ChangeCoverSheet: View {
             // 지금 표지와 페이지 크기 (미리보기를 같은 비율로)
             let url = item.url
             let info = await Task.detached(priority: .userInitiated) { () -> (CoverStyle?, CGSize)? in
-                guard let document = PDFDocument(url: url), let first = document.page(at: 0) else { return nil }
+                guard let data = try? Data(contentsOf: url), let document = PDFDocument(data: data),
+                      let first = document.page(at: 0) else { return nil }
                 let style = PaperSpec.keywords(document.documentAttributes)
                     .first { $0.hasPrefix(PaperSpec.coverPrefix) }
                     .flatMap { CoverStyle(rawValue: String($0.dropFirst(PaperSpec.coverPrefix.count))) }

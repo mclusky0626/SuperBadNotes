@@ -105,7 +105,10 @@ nonisolated final class InkAnnotation: PDFAnnotation {
     private var drawing = PKDrawing()
     private var geometry = PageGeometry(box: .zero, rotation: 0)
 
-    init(drawing: PKDrawing, geometry: PageGeometry) throws {
+    /// bakeGlass: 다른 앱용 모양에 유리펜 흉내를 그릴지 (.badnote는 안 그림)
+    private var bakeGlass = true
+
+    init(drawing: PKDrawing, geometry: PageGeometry, bakeGlass: Bool = true) throws {
         let payload = try InkPayload.encode(drawing)
         // 주석 영역은 필기가 있는 곳만 (다른 앱에서 페이지 전체가 선택되지 않게)
         var rect = drawing.bounds.applying(geometry.canvasToPage)
@@ -118,6 +121,7 @@ nonisolated final class InkAnnotation: PDFAnnotation {
         super.init(bounds: rect, forType: .stamp, withProperties: nil)
         self.drawing = drawing
         self.geometry = geometry
+        self.bakeGlass = bakeGlass
         setValue(payload, forAnnotationKey: InkPayload.inkKey)
         setValue(InkPayload.meta(geometry), forAnnotationKey: InkPayload.metaKey)
         // 기본값이면 기기 사용자 이름이 PDF에 박힘
@@ -129,6 +133,7 @@ nonisolated final class InkAnnotation: PDFAnnotation {
     }
 
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
-        InkRenderer.draw(drawing, in: context, transform: geometry.canvasToPage)
+        let shown = bakeGlass ? drawing : PKDrawing(strokes: drawing.strokes.filter { !GlassInk.isGlass($0) })
+        InkRenderer.draw(shown, in: context, transform: geometry.canvasToPage)
     }
 }
