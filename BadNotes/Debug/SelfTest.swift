@@ -55,6 +55,7 @@ nonisolated enum SelfTest {
             try await documentTests(root: root, results)
             try await notebookTests(root: root, results)
             try elementTests(root: root, results)
+            try await boardGrowthTests(root: root, results)
             try coverTests(root: root, results)
             await maskMatchesPencilKit(results)
             pageCurlTests(results)
@@ -273,6 +274,59 @@ nonisolated enum SelfTest {
             } else {
                 r.check("부분 지우개: 두 번째 지우기", false, "안 닿음")
             }
+        }
+        // 가운데만 가늘게 지운 뒤 양옆에 남은 조각도 다시 지워짐
+        let fat = line(.pen, .black, CGPoint(x: 0, y: 100), CGPoint(x: 200, y: 100), width: 14)
+        let fatWidth = InkRenderer.sample(fat).meanWidth
+        if let split = StrokeEditing.erase(fat, sampled: InkRenderer.sample(fat), from: CGPoint(x: -30, y: 100),
+                                           to: CGPoint(x: 230, y: 100), radius: fatWidth * 0.2)?.first {
+            let sliver = InkRenderer.sample(split)
+            let edge = CGPoint(x: 100, y: 100 + fatWidth * 0.4)
+            let again = StrokeEditing.erase(split, sampled: sliver, from: CGPoint(x: -30, y: edge.y), to: CGPoint(x: 230, y: edge.y),
+                                            radius: fatWidth * 0.35)
+            let other = CGPoint(x: 100, y: 100 - fatWidth * 0.4)
+            let last = again?.first.flatMap {
+                StrokeEditing.erase($0, sampled: InkRenderer.sample($0), from: CGPoint(x: -30, y: other.y),
+                                    to: CGPoint(x: 230, y: other.y), radius: fatWidth * 0.35)
+            }
+            let rest = last?.first.map { StrokeEditing.inkOutline(InkRenderer.sample($0)).intersection($0.mask!.cgPath).boundingBoxOfPath }
+            r.check("부분 지우개: 가운데를 지운 뒤 남은 가장자리 조각도 지워짐", again?.first != nil && last?.isEmpty == true,
+                    "\(again?.count ?? -1) / \(last?.count ?? -1) 남은 \(String(describing: rest))")
+        } else {
+            r.check("부분 지우개: 가운데를 지운 뒤 남은 가장자리 조각도 지워짐", false, "가운데가 안 지워짐")
+        }
+        // 곡선 펜 획을 지그재그로 문질러 지우면 부스러기 없이 다 지워짐
+        var curvyBuilder = StrokeBuilder(inkType: .pen, color: .systemRed, width: 3.8, pressureRange: 0.7...1.3, startTime: 0)
+        for i in 0...80 {
+            let t = CGFloat(i) / 80
+            curvyBuilder.add(InputSample(location: CGPoint(x: 20 + 180 * t, y: 100 + sin(t * .pi * 3) * 40),
+                                         time: Double(i) * 0.01, force: 0.3 + 0.5 * sin(t * .pi), azimuth: 0, altitude: .pi / 2))
+        }
+        if var current = curvyBuilder.makeStroke(seed: InkOrigin.badNotesSeed()) {
+            var alive = true
+            var previous = CGPoint(x: 10, y: 40)
+            for i in 0...60 where alive {
+                let point = CGPoint(x: 10 + CGFloat(i) * 3.5, y: i.isMultiple(of: 2) ? 40 : 160)
+                for step in 0..<6 where alive {
+                    let a = CGPoint(x: previous.x + (point.x - previous.x) * CGFloat(step) / 6,
+                                    y: previous.y + (point.y - previous.y) * CGFloat(step) / 6)
+                    let b2 = CGPoint(x: previous.x + (point.x - previous.x) * CGFloat(step + 1) / 6,
+                                     y: previous.y + (point.y - previous.y) * CGFloat(step + 1) / 6)
+                    if let result = StrokeEditing.erase(current, sampled: InkRenderer.sample(current), from: a, to: b2, radius: 11) {
+                        if let next = result.first { current = next } else { alive = false }
+                    }
+                }
+                previous = point
+            }
+            var reds = 0
+            if alive {
+                let image = renderStrokes([current], size: CGSize(width: 240, height: 200))
+                for x in stride(from: 0, to: 240, by: 2) { for y in stride(from: 40, to: 160, by: 2) {
+                    let c = rgb(image, at: CGPoint(x: x, y: y))
+                    if c.r - c.g > 0.25 { reds += 1 }
+                } }
+            }
+            r.check("부분 지우개: 곡선 획을 문질러 지우면 부스러기 안 남음", !alive || reds == 0, "남은 빨간 점 \(reds)")
         }
         let wiped = StrokeEditing.erase(horizontal, sampled: sampled, from: CGPoint(x: -10, y: 100),
                                         to: CGPoint(x: 210, y: 100), radius: 30)
@@ -837,12 +891,12 @@ nonisolated enum SelfTest {
         // 화이트보드
         let boardURL = root.appendingPathComponent("Board.pdf")
         try PaperRenderer.boardPDF(name: "보드").write(to: boardURL)
-        let far = PKDrawing(strokes: [line(.pen, .black, CGPoint(x: 9000, y: 9000), CGPoint(x: 9400, y: 9100), width: 4)])
+        let far = PKDrawing(strokes: [line(.pen, .black, CGPoint(x: 2000, y: 1500), CGPoint(x: 2400, y: 1600), width: 4)])
         _ = try PDFInkWriter.apply([0: far], to: boardURL)
         let board = try NoteLoader.load(boardURL)
-        r.check("화이트보드: 아주 큰 한 장 + 화이트보드로 알아봄 + 먼 곳 필기도 저장",
+        r.check("화이트보드: 작게 시작하는 한 장 + 화이트보드로 알아봄 + 필기 저장",
                 board.pdf.pageCount == 1 && PaperSpec.isBoard(board.pdf.documentAttributes)
-                    && (board.pdf.page(at: 0)?.bounds(for: .cropBox).width ?? 0) >= 14_000
+                    && abs((board.pdf.page(at: 0)?.bounds(for: .cropBox).width ?? 0) - PaperSpec.boardStart.width) < 1
                     && board.drawings[0]?.strokes.count == 1)
         r.check("화이트보드: 표지는 못 넣음", (try? PDFInkWriter.replaceCover(of: boardURL, with: .navy, title: "보드")) == nil)
 
@@ -860,6 +914,33 @@ nonisolated enum SelfTest {
         r.check("요소: 복구 기록에서 되살림", recovered.elements[2] == elements && recovered.images[prepared.id] == prepared.data)
         journal.remove(page: 2)
         r.check("요소: 복구 기록 지우기", journal.load().elements[2] == nil)
+    }
+
+    // MARK: 화이트보드 늘리기
+
+    private static func boardGrowthTests(root: URL, _ r: Results) async throws {
+        let url = root.appendingPathComponent("Grow.pdf")
+        try PaperRenderer.boardPDF(name: "늘리기").write(to: url)
+        let d = PKDrawing(strokes: [line(.pen, .black, CGPoint(x: 100, y: 100), CGPoint(x: 300, y: 100), width: 4)])
+        var sticky = PageElement(kind: .sticky, x: 50, y: 200, width: 200, height: 200)
+        sticky.text = "메모"
+        _ = try PDFInkWriter.apply(content: [0: PageContent(drawing: d, elements: [sticky])], images: [:], to: url)
+        await MainActor.run { LegacyMigration.skipForTesting() }
+        let note = try await NoteDocument.open(url)
+        let grown = await note.growBoard(left: 1600, top: 0, right: 1600, bottom: 1600)
+        await note.flush(reason: "점검")
+        let loaded = try NoteLoader.load(url)
+        let size = loaded.pdf.page(at: 0)?.bounds(for: .cropBox).size ?? .zero
+        let start = PaperSpec.boardStart
+        r.check("화이트보드 늘리기: 가장자리 쪽으로 크기가 늘고 파일에도 저장",
+                abs(size.width - (start.width + 3200)) < 1 && abs(size.height - (start.height + 1600)) < 1
+                    && grown?.shift == CGPoint(x: 1600, y: 0), "\(size) \(String(describing: grown))")
+        let strokeX = loaded.drawings[0]?.bounds.minX ?? 0, stickyX = loaded.elements[0]?.first?.x ?? 0
+        r.check("화이트보드 늘리기: 왼쪽으로 늘리면 필기·메모지도 그만큼 밀려서 제자리",
+                abs(strokeX - (d.bounds.minX + 1600)) < 2 && abs(stickyX - 1650) < 0.5, "\(strokeX) \(stickyX)")
+        let key = AppPaths.key(for: url)
+        try? FileManager.default.removeItem(at: AppPaths.backups.appendingPathComponent(key))
+        try? FileManager.default.removeItem(at: AppPaths.journal.appendingPathComponent(key))
     }
 
     // MARK: 표지

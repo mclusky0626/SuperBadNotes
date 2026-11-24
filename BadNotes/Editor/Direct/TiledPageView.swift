@@ -172,9 +172,15 @@ final class PageView: UIView {
     private let elementLayer = UIView()
     private(set) var elementViews: [UUID: ElementView] = [:]
     let selectionFrame = SelectionFrameView()
-    /// 유리펜 획 모양의 진짜 Liquid Glass (색·진하기별 하나, 필기 타일 바로 위)
-    private var glassHosts: [String: GlassShapeHost] = [:]
+    /// 유리펜 획·유리 글자 굴절 그림 (필기 타일 바로 위)
+    private var glassView: UIImageView?
+    private var glassGeneration = 0
     private var glassOutlines: [StrokeKey: CGPath] = [:]
+    private let pdfPage: PDFPage
+    private let documentLock: ReadWriteLock
+    private let isBoard: Bool
+    private var currentElements: [PageElement] = []
+    private var imageLookup: ((String) -> CGImage?)?
     private let showsInk: Bool
 
     /// showsInk: Apple 도구 모드에서는 필기를 PencilKit이 직접 그려서 끔
@@ -183,6 +189,9 @@ final class PageView: UIView {
         self.index = index
         self.ink = ink
         self.showsInk = showsInk
+        self.pdfPage = page
+        self.documentLock = documentLock
+        self.isBoard = board
         let rect = CGRect(origin: .zero, size: size)
         let background: any TileRenderer = board ? BoardTileRenderer()
             : PDFPageTileRenderer(page: page, size: size, documentLock: documentLock)
@@ -270,7 +279,10 @@ final class PageView: UIView {
     // MARK: 요소
 
     /// 문서의 요소 목록에 맞춰 뷰를 더하고·빼고·고침 (순서 = 목록 순서, 뒤가 위)
-    func setElements(_ elements: [PageElement], image: (String) -> CGImage?, animated: Bool = false) {
+    func setElements(_ elements: [PageElement], image: @escaping (String) -> CGImage?, animated: Bool = false) {
+        currentElements = elements
+        imageLookup = image
+        defer { scheduleGlass() }
         let ids = Set(elements.map(\.id))
         for (id, view) in elementViews where !ids.contains(id) {
             elementViews[id] = nil
@@ -312,39 +324,67 @@ final class PageView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// 유리펜 획: 색·진하기가 같은 획끼리 윤곽을 합쳐서 그 모양의 진짜 Liquid Glass를 필기 위에 얹음
-    func updateGlassInk() {
-        guard showsInk else { return }
-        let strokes = ink.renderSnapshot().strokes.filter { $0.glassStrength != nil }
-        var next: [StrokeKey: CGPath] = [:]
-        var groups: [String: (path: CGMutablePath, color: CGColor, strength: CGFloat)] = [:]
-        for s in strokes {
-            let outline = glassOutlines[s.key] ?? {
-                var shape = GlassInk.outline(centerline: InkRenderer.centerline(s.points, smooth: true), width: s.meanWidth)
-                if let mask = s.mask, s.maskSpace == .path { shape = shape.intersection(mask) }
-                var t = s.transform
-                return shape.copy(using: &t) ?? shape
-            }()
-            next[s.key] = outline
-            let strength = s.glassStrength ?? 0
-            let c = s.color.components ?? []
-            let key = c.map { String(format: "%.3f", Double($0)) }.joined(separator: ",") + "|\(Int(strength * 100))"
-            if groups[key] == nil { groups[key] = (CGMutablePath(), s.color, strength) }
-            groups[key]?.path.addPath(outline)
+    /// 유리펜 획·유리 글자: 굴절을 직접 계산한 그림을 필기 위에 얹음 (바뀔 때마다 백그라운드에서 다시)
+    func updateGlassInk() { scheduleGlass() }
+
+    func scheduleGlass() {
+        glassGeneration += 1
+        let generation = glassGeneration
+        var shapes: [GlassRefraction.Shape] = []
+        let snapshot = ink.renderSnapshot().strokes
+        if showsInk {
+            for s in snapshot {
+                guard let strength = s.glassStrength else { continue }
+                let outline = glassOutlines[s.key] ?? {
+                    var shape = GlassInk.outline(centerline: InkRenderer.centerline(s.points, smooth: true), width: s.meanWidth)
+                    if let mask = s.mask, s.maskSpace == .path { shape = shape.intersection(mask) }
+                    var t = s.transform
+                    return shape.copy(using: &t) ?? shape
+                }()
+                glassOutlines[s.key] = outline
+                let c = s.color.components ?? [0, 0, 0]
+                shapes.append(.init(path: outline, radius: s.meanWidth * s.widthScale / 2,
+                                    tint: (c[0], c.count > 2 ? c[1] : c[0], c.count > 2 ? c[2] : c[0]), strength: strength))
+            }
         }
-        glassOutlines = next
-        for (key, view) in glassHosts where groups[key] == nil {
-            view.removeFromSuperview()
-            glassHosts[key] = nil
+        for element in currentElements where element.glassText && !element.text.isEmpty {
+            // 고치는 중인 글상자는 빼기 (입력 중엔 글자가 겹쳐 보이지 않게)
+            if elementViews[element.id]?.textView != nil { continue }
+            let inner = element.frame.insetBy(dx: element.padding.width, dy: element.padding.height)
+            let outline = GlyphOutline.path(text: element.text, attributes: ElementRenderer.attributes(element), in: inner)
+            let c = element.textColor
+            shapes.append(.init(path: outline, radius: max(0.8, element.fontSize * (element.bold ? 0.075 : 0.055)),
+                                tint: (c.r, c.g, c.b), strength: CGFloat(element.glassTextStrength)))
         }
-        for (key, group) in groups {
-            let tint = UIColor(cgColor: group.color)
-            if let view = glassHosts[key] {
-                view.update(path: group.path, tint: tint, strength: Double(group.strength))
-            } else {
-                let view = GlassShapeHost(path: group.path, tint: tint, strength: Double(group.strength), frame: bounds)
-                insertSubview(view, aboveSubview: inkTiles)
-                glassHosts[key] = view
+        guard !shapes.isEmpty else {
+            glassView?.removeFromSuperview()
+            glassView = nil
+            return
+        }
+        var images: [String: CGImage] = [:]
+        for element in currentElements { if let id = element.imageID, let image = imageLookup?(id) { images[id] = image } }
+        let scene = GlassRefraction.Scene(page: pdfPage, pageSize: bounds.size, board: isBoard, documentLock: documentLock,
+                                          elements: currentElements.filter { !$0.glassText }, images: images,
+                                          strokes: snapshot, shapes: shapes)
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.04) { [weak self] in
+            let result = GlassRefraction.render(scene)
+            DispatchQueue.main.async {
+                guard let self, self.glassGeneration == generation else { return }
+                guard let result else {
+                    self.glassView?.removeFromSuperview()
+                    self.glassView = nil
+                    return
+                }
+                let view = self.glassView ?? {
+                    let made = UIImageView()
+                    made.isUserInteractionEnabled = false
+                    made.contentMode = .scaleToFill
+                    self.insertSubview(made, belowSubview: self.selectionFrame)
+                    return made
+                }()
+                self.glassView = view
+                view.frame = result.frame
+                view.image = UIImage(cgImage: result.image, scale: result.scale, orientation: .up)
             }
         }
     }

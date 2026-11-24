@@ -78,6 +78,8 @@ struct EditorScreen: View {
                         .buttonStyle(.glass)
                         .transition(.scale.combined(with: .opacity))
                     }
+                    HStack(spacing: 10) {
+                    ZoomChip(bridge: bridge, settings: settings)
                     StatusCapsule(title: note.title, page: bridge.page, pageCount: bridge.pageCount,
                                   saveState: note.saveState, isBook: bridge.isBook,
                                   canBack: bridge.canTurnBack, canForward: bridge.canTurnForward,
@@ -85,6 +87,7 @@ struct EditorScreen: View {
                         guard bridge.pageCount > 0 else { return }
                         jumpText = ""
                         showJump = true
+                    }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -157,15 +160,54 @@ struct EditorScreen: View {
         case .direct:
             DirectEditor(document: note, bridge: bridge, initialPage: initialPage, tool: tools.tool,
                          fingerDrawing: settings.fingerDrawing, tapToUndo: settings.tapToUndo,
-                         pageTurn: settings.pageTurn, twoUp: settings.twoUpLandscape, insets: insets)
+                         pageTurn: settings.pageTurn, twoUp: settings.twoUpLandscape, zoomLocked: settings.zoomLocked,
+                         insets: insets)
         case .pencilKit:
             PencilKitEditor(document: note, bridge: bridge, initialPage: initialPage,
-                            fingerDrawing: settings.fingerDrawing, twoUp: settings.twoUpLandscape, insets: insets)
+                            fingerDrawing: settings.fingerDrawing, twoUp: settings.twoUpLandscape,
+                            zoomLocked: settings.zoomLocked, insets: insets)
         }
     }
 
     private func addPage() {
         guard let index = note.appendPage() else { return }
         bridge.pageAdded(index)
+    }
+}
+
+/// 아래 왼쪽: 지금 배율. 누르면 페이지 맞춤·배율 고르기·확대 고정
+struct ZoomChip: View {
+    @Environment(ThemeStore.self) private var themes
+    let bridge: EditorBridge
+    @Bindable var settings: AppSettings
+
+    var body: some View {
+        Menu {
+            Button("페이지에 맞추기", systemImage: "arrow.down.right.and.arrow.up.left") { bridge.zoom(nil) }
+            Section("배율") {
+                ForEach([125, 150, 200, 300], id: \.self) { percent in
+                    Button("\(percent)%") { bridge.zoom(Double(percent)) }
+                }
+            }
+            Toggle(isOn: $settings.zoomLocked) {
+                Label("확대 고정 (핀치 끄기)", systemImage: "lock")
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: settings.zoomLocked ? "lock.fill" : "plus.magnifyingglass")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("\(bridge.zoomPercent)%")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .contentTransition(.numericText(value: Double(bridge.zoomPercent)))
+            }
+            .foregroundStyle(settings.zoomLocked ? themes.accent : Color.primary)
+            .padding(.horizontal, 14)
+            .frame(height: 44)
+            .contentShape(Capsule())
+        }
+        .menuIndicator(.hidden)
+        .glassEffect(themes.glass.interactive(), in: .capsule)
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: bridge.zoomPercent)
+        .accessibilityLabel("배율 \(bridge.zoomPercent)%")
     }
 }

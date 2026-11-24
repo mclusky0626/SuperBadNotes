@@ -121,6 +121,12 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
         bridge.pageAddedAction = { [weak self] page in self?.pageAdded(page) }
         bridge.insertAction = { [weak self] what in self?.insert(what) }
         bridge.restyleAction = { [weak self] in self?.elements.restyleFromTools() }
+        bridge.zoomAction = { [weak self] percent in
+            guard let self else { return }
+            let target = min(max(self.fitScale * CGFloat((percent ?? 100) / 100), self.canvas.minimumZoomScale),
+                             self.canvas.maximumZoomScale)
+            self.canvas.setZoomScale(target, animated: true)
+        }
         setFingerDrawing(AppSettings.shared.fingerDrawing)
     }
 
@@ -133,6 +139,20 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     }
 
     private var twoUp = AppSettings.shared.twoUpLandscape
+    private var fitScale: CGFloat = 1
+    private var zoomLocked = false
+
+    func setZoomLocked(_ locked: Bool) {
+        guard locked != zoomLocked else { return }
+        zoomLocked = locked
+        canvas.pinchGestureRecognizer?.isEnabled = !locked
+        bridge.zoomLocked = locked
+    }
+
+    private func reportZoom() {
+        let percent = Int((canvas.zoomScale / max(fitScale, 0.0001) * 100).rounded())
+        if bridge.zoomPercent != percent { bridge.zoomPercent = percent }
+    }
 
     /// 가로 두 쪽 설정이 바뀌면 다시 배치 (페이지 자리가 바뀌면 필기도 다시 합침)
     func setTwoUp(_ on: Bool) {
@@ -231,6 +251,7 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
             if resetZoom && !didInitialScroll { canvas.zoomScale = 1 }
         } else {
             let fit = bounds.width / natural.width
+            fitScale = fit
             canvas.minimumZoomScale = fit * 0.5
             canvas.maximumZoomScale = fit * 8
             if resetZoom { canvas.zoomScale = fit }
@@ -362,6 +383,7 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     // MARK: 스크롤
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        reportZoom()
         syncUnderlay()
         elements.updateSelectionFrame()
     }
@@ -608,6 +630,13 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
         editMenu?.dismissMenu()
     }
 
+    func elementTransfer(_ point: CGPoint, from page: Int) -> (page: Int, point: CGPoint)? {
+        guard pageViews.indices.contains(page) else { return nil }
+        let inPages = pageViews[page].convert(point, to: pagesView)
+        guard let target = pageViews.first(where: { $0.frame.contains(inPages) }) else { return nil }
+        return (target.index, pagesView.convert(inPages, to: target))
+    }
+
     func elementReveal(_ rect: CGRect, in pageView: PageView) {
         let target = pageView.convert(rect, to: canvas)
         let bottom = canvas.contentOffset.y + canvas.bounds.height - canvas.adjustedContentInset.bottom
@@ -626,6 +655,7 @@ struct PencilKitEditor: UIViewRepresentable {
     let initialPage: Int
     let fingerDrawing: Bool
     let twoUp: Bool
+    var zoomLocked = false
     let insets: EdgeInsets
 
     func makeUIView(context: Context) -> PencilKitEditorView {
@@ -637,6 +667,7 @@ struct PencilKitEditor: UIViewRepresentable {
     func updateUIView(_ view: PencilKitEditorView, context: Context) {
         view.setFingerDrawing(fingerDrawing)
         view.setTwoUp(twoUp)
+        view.setZoomLocked(zoomLocked)
         view.chromeInsets = UIEdgeInsets(top: insets.top, left: insets.leading, bottom: insets.bottom, right: insets.trailing)
     }
 

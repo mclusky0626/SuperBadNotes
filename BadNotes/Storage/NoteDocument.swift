@@ -29,7 +29,7 @@ final class NoteDocument {
 
     var title: String { url.deletingPathExtension().lastPathComponent }
     var pageCount: Int { pdf.pageCount }
-    var hasUnsavedChanges: Bool { !dirty.isEmpty || !pendingAppends.isEmpty }
+    var hasUnsavedChanges: Bool { !dirty.isEmpty || !pendingAppends.isEmpty || pendingBoardSize != nil }
     /// 노트북이면 종이 정보 (PDF 키워드에서 읽음). 그냥 PDF면 nil
     @ObservationIgnored private(set) var paperSpec: PaperSpec?
     var isNotebook: Bool { paperSpec != nil }
@@ -62,6 +62,8 @@ final class NoteDocument {
     @ObservationIgnored private var retryDelay: Duration = .seconds(5)
     /// 아직 파일에 안 붙인 새 페이지 (한 장짜리 PDF 데이터)
     @ObservationIgnored private var pendingAppends: [Data] = []
+    /// 화이트보드 새 크기 (아직 파일에 안 씀)
+    @ObservationIgnored private var pendingBoardSize: CGSize?
     @ObservationIgnored private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
 
     // MARK: 열기
@@ -122,6 +124,40 @@ final class NoteDocument {
     }
 
     // MARK: 필기
+
+    /// 화이트보드 늘리기: 네 방향으로 늘릴 양(pt). 왼쪽·위로 늘리면 내용 좌표가 그만큼 밀림.
+    /// 새 크기와 내용이 밀린 양을 돌려줌 (더 못 늘리면 nil)
+    func growBoard(left: CGFloat, top: CGFloat, right: CGFloat, bottom: CGFloat) -> (size: CGSize, shift: CGPoint)? {
+        guard isBoard, let page = pdf.page(at: 0) else { return nil }
+        let old = page.bounds(for: .cropBox).size
+        let maxSide = PaperSpec.boardMax
+        let addX = min(left + right, max(0, maxSide - old.width))
+        let addY = min(top + bottom, max(0, maxSide - old.height))
+        guard addX > 0.5 || addY > 0.5 else { return nil }
+        let shiftX = left + right > 0 ? addX * left / (left + right) : 0
+        let shiftY = top + bottom > 0 ? addY * top / (top + bottom) : 0
+        let size = CGSize(width: old.width + addX, height: old.height + addY)
+        renderLock.write {
+            let box = CGRect(origin: .zero, size: size)
+            page.setBounds(box, for: .mediaBox)
+            page.setBounds(box, for: .cropBox)
+        }
+        if shiftX != 0 || shiftY != 0 {
+            let shift = CGAffineTransform(translationX: shiftX, y: shiftY)
+            if let drawing = drawings[0] { drawings[0] = drawing.transformed(using: shift) }
+            if var list = elementsByPage[0] {
+                for i in list.indices { list[i].frame = list[i].frame.offsetBy(dx: shiftX, dy: shiftY) }
+                elementsByPage[0] = list
+            }
+        }
+        pendingBoardSize = size
+        markChanged(0)
+        Log.info("화이트보드 늘림: \(Int(size.width))×\(Int(size.height))")
+        return (size, CGPoint(x: shiftX, y: shiftY))
+    }
+
+    /// 마지막으로 늘린 만큼 내용이 밀린 양 (편집기가 화면 위치를 맞추는 데 씀)
+    func boardSize() -> CGSize { pdf.page(at: 0)?.bounds(for: .cropBox).size ?? .zero }
 
     /// 화이트보드에서 처음 보여 줄 곳: 필기·요소가 있는 영역 (없으면 nil)
     func contentBounds(page: Int) -> CGRect? {
@@ -272,6 +308,7 @@ final class NoteDocument {
         let images = imageStore.filter { used.contains($0.key) }
         let revisions = Dictionary(uniqueKeysWithValues: dirty.map { ($0, revision[$0] ?? 0) })
         let appends = pendingAppends
+        let boardSize = pendingBoardSize
         let url = url
         let needsBackup = !backedUpThisSession
 
@@ -283,7 +320,10 @@ final class NoteDocument {
                     Log.warn("백업 실패 (저장은 계속함): \(error.localizedDescription)")
                 }
             }
-            return Result { try PDFInkWriter.apply(content: pages, images: images, appending: appends, to: url) }
+            return Result {
+                try PDFInkWriter.apply(content: pages, images: images, appending: appends,
+                                       pageSizes: boardSize.map { [0: $0] } ?? [:], to: url)
+            }
         }.value
         isSaving = false
 
@@ -292,6 +332,7 @@ final class NoteDocument {
             backedUpThisSession = true
             retryDelay = .seconds(5)
             pendingAppends.removeFirst(min(appends.count, pendingAppends.count))
+            if pendingBoardSize == boardSize { pendingBoardSize = nil }
             for (page, saved) in revisions where revision[page] == saved {
                 dirty.remove(page)
                 journalTimers[page]?.cancel()

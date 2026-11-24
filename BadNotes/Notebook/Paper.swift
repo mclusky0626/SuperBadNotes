@@ -128,7 +128,11 @@ nonisolated struct PaperSpec: Codable, Hashable, Sendable {
     static let coverPrefix = "BadNotesCover="
     /// 무한 화이트보드 (아주 큰 한 장)
     static let boardKeyword = "BadNotesBoard=dots"
-    static let boardSide: CGFloat = 14_000
+    /// 처음 화이트보드 크기 (작게 시작해서 가장자리로 갈수록 늘어남)
+    static let boardStart = CGSize(width: 3_000, height: 2_200)
+    /// 늘릴 때 한 번에 늘리는 양, 가장 큰 크기 (PDF 한 페이지 한계 14,400pt)
+    static let boardGrowStep: CGFloat = 1_600
+    static let boardMax: CGFloat = 14_400
 
     static func isBoard(_ documentAttributes: [AnyHashable: Any]?) -> Bool {
         keywords(documentAttributes).contains { $0.hasPrefix("BadNotesBoard=") }

@@ -26,49 +26,84 @@ nonisolated enum StrokeEditing {
     }
 
     /// 지우개가 지나간 선분(a→b, 반지름 radius)이 획에 닿는지
-    static func touches(_ s: SampledStroke, from a: CGPoint, to b: CGPoint, radius: CGFloat) -> Bool {
-        let area = segmentBounds(a, b, radius: radius)
-        guard s.bounds.intersects(area) else { return false }
-        let scale = s.widthScale
-        for point in s.points {
-            let q = point.location.applying(s.transform)
-            if distance(q, toSegment: a, b) <= radius + point.width * scale / 2 {
-                return isVisible(s, pathPoint: point.location, drawingPoint: q)
-            }
-        }
-        return false
+    /// 획이 실제로 칠하는 모양 (경로 좌표, 가장 굵은 곳 기준). 지우개 판정에 씀 — 가운데 점만 보면
+    /// 가운데를 지운 뒤 양옆에 남은 가는 조각이 영영 안 지워졌음
+    private static let outlineCache = NSCache<NSNumber, CGPath>()
+
+    static func inkOutline(_ s: SampledStroke) -> CGPath {
+        let id = NSNumber(value: s.key.hashValue)
+        if let hit = outlineCache.object(forKey: id) { return hit }
+        // 화면에 그리는 것과 같은 곡선 + 넉넉한 굵기 (Apple 렌더러·곡선 바깥으로 삐져나온 잉크까지 덮게)
+        let scale = max(s.widthScale, 0.01)
+        let width = max(0.5, s.points.map(\.width).max() ?? s.meanWidth) * 1.15 + 1.5 / scale
+        let outline = GlassInk.outline(centerline: InkRenderer.centerline(s.points, smooth: true), width: width)
+        outlineCache.setObject(outline, forKey: id)
+        return outline
     }
 
-    /// 부분 지우개: 획 모양(경로·굵기·질감)은 그대로 두고, 보이는 영역(마스크)에서 지우개 자국만 뺌.
-    /// 예전처럼 점을 다시 찍어 새 획을 만들면 곡선이 다시 계산돼서 남은 부분 모양이 변했음.
-    /// 안 닿았으면 nil, 남은 게 없으면 빈 배열
-    static func erase(_ stroke: PKStroke, sampled: SampledStroke, from a: CGPoint, to b: CGPoint,
-                      radius: CGFloat) -> [PKStroke]? {
-        guard touches(sampled, from: a, to: b, radius: radius) else { return nil }
-        // 지우개 자국(그림 좌표) → 획의 경로 좌표 (PencilKit 마스크는 경로 좌표)
+    /// 지금 보이는 잉크 모양 (마스크로 지운 곳 뺌), 경로 좌표
+    private static func visibleInk(_ s: SampledStroke) -> CGPath {
+        let outline = inkOutline(s)
+        guard let mask = s.mask else { return outline }
+        switch s.maskSpace {
+        case .none: return outline
+        case .path: return outline.intersection(mask)
+        case .drawing:
+            var inverse = s.transform.inverted()
+            return outline.intersection(mask.copy(using: &inverse) ?? mask)
+        }
+    }
+
+    /// 지우개 자국 (그림 좌표의 선분 a→b, 반지름 radius) → 획의 경로 좌표
+    private static func bite(_ s: SampledStroke, from a: CGPoint, to b: CGPoint, radius: CGFloat) -> CGPath? {
         let trail = CGMutablePath()
         trail.move(to: a)
         trail.addLine(to: b == a ? CGPoint(x: a.x + 0.01, y: a.y) : b)
-        var inverse = stroke.transform.inverted()
-        guard let bite = trail.copy(strokingWithWidth: radius * 2, lineCap: .round, lineJoin: .round, miterLimit: 1)
-            .copy(using: &inverse) else { return nil }
+        var inverse = s.transform.inverted()
+        return trail.copy(strokingWithWidth: radius * 2, lineCap: .round, lineJoin: .round, miterLimit: 1).copy(using: &inverse)
+    }
 
+    /// 지우개가 지나간 선분(a→b, 반지름 radius)이 획의 '보이는 잉크'에 닿는지
+    static func touches(_ s: SampledStroke, from a: CGPoint, to b: CGPoint, radius: CGFloat) -> Bool {
+        let area = segmentBounds(a, b, radius: radius)
+        guard s.bounds.intersects(area), let bite = bite(s, from: a, to: b, radius: radius) else { return false }
+        let ink = visibleInk(s)
+        guard ink.boundingBoxOfPath.intersects(bite.boundingBoxOfPath) else { return false }
+        return ink.intersects(bite)
+    }
+
+    /// 부분 지우개: 획 모양(경로·굵기·질감)은 그대로 두고, 보이는 영역(마스크)에서 지우개 자국만 뺌.
+    /// 안 닿았으면 nil, 남은 잉크가 없으면 빈 배열
+    static func erase(_ stroke: PKStroke, sampled: SampledStroke, from a: CGPoint, to b: CGPoint,
+                      radius: CGFloat) -> [PKStroke]? {
+        guard touches(sampled, from: a, to: b, radius: radius),
+              let bite = bite(sampled, from: a, to: b, radius: radius) else { return nil }
+        var inverse = stroke.transform.inverted()
         let visible: CGPath
         if let mask = stroke.mask?.cgPath, sampled.maskSpace != .drawing {
             visible = mask
         } else if let mask = stroke.mask?.cgPath {
             // 예전 방식(그림 좌표) 마스크면 경로 좌표로 옮김
-            var t = inverse
-            visible = mask.copy(using: &t) ?? mask
+            visible = mask.copy(using: &inverse) ?? mask
         } else {
             let margin = max(24, radius * 2)
             let area = stroke.renderBounds.applying(inverse).insetBy(dx: -margin, dy: -margin)
             visible = CGPath(rect: area, transform: nil)
         }
-        let remaining = visible.subtracting(bite)
-        // 남은 부분 중 획이 지나가는 곳이 하나도 없으면 획째 지움
-        guard !remaining.isEmpty,
-              sampled.points.contains(where: { remaining.contains($0.location) }) else { return [] }
+        var remaining = visible.subtracting(bite)
+        // 지우개 자국 가까이에 남은 작은 조각(부스러기)은 같이 지움
+        let crumb = max(3, radius * 0.9)
+        let near = bite.boundingBoxOfPath.insetBy(dx: -radius, dy: -radius)
+        let crumbs = CGMutablePath()
+        for piece in inkOutline(sampled).intersection(remaining).componentsSeparated() {
+            let box = piece.boundingBoxOfPath
+            if box.width < crumb, box.height < crumb, box.intersects(near) { crumbs.addRect(box.insetBy(dx: -0.75, dy: -0.75)) }
+        }
+        if !crumbs.isEmpty { remaining = remaining.subtracting(crumbs) }
+        // 남은 마스크 안에 실제 잉크가 거의 없으면(부스러기 포함) 획째 지움
+        // 경계에 생기는 계산 부스러기(머리카락처럼 가는 조각)는 남은 걸로 치지 않음
+        let leftover = inkOutline(sampled).intersection(remaining).boundingBoxOfPath
+        guard !remaining.isEmpty, !leftover.isNull, min(leftover.width, leftover.height) > 0.35 else { return [] }
         return [PKStroke(ink: stroke.ink, path: stroke.path, transform: stroke.transform,
                          mask: UIBezierPath(cgPath: remaining), randomSeed: stroke.randomSeed)]
     }

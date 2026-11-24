@@ -72,6 +72,7 @@ struct LibraryFolderView: View {
     @State private var deleting: LibraryItem?
     @State private var moving: LibraryItem?
     @State private var recovering: LibraryItem?
+    @State private var dropTarget: URL?
 
     private var folder: URL {
         if case .folder(let url) = mode { return url }
@@ -175,11 +176,52 @@ struct LibraryFolderView: View {
         if item.isFolder {
             NavigationLink(value: item.url) { content }
                 .buttonStyle(.plain)
+                // 문서·폴더를 꾹 눌러 끌어다 놓으면 이 폴더로 옮김
+                .dropDestination(for: URL.self) { urls, _ in
+                    moveDropped(urls, into: item)
+                } isTargeted: { over in
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { dropTarget = over ? item.url : nil }
+                }
+                .scaleEffect(dropTarget == item.url ? 1.12 : 1)
+                .overlay {
+                    if dropTarget == item.url {
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .strokeBorder(themes.accent, lineWidth: 3)
+                            .padding(-6)
+                    }
+                }
+                .draggable(item.url)
         } else {
             content
                 .hoverEffect(.lift)
                 .onTapGesture { onOpen(item.url) }
+                .draggable(item.url) {
+                    // 끄는 동안 보이는 작은 표지
+                    VStack(spacing: 6) {
+                        Image(systemName: NoteFormat.of(item.url) == .badnote ? "doc.richtext" : "book.closed.fill")
+                            .font(.system(size: 34))
+                            .foregroundStyle(themes.accent)
+                        Text(item.name).font(.caption.weight(.semibold)).lineLimit(1)
+                    }
+                    .padding(14)
+                    .glassEffect(themes.glass, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
         }
+    }
+
+    /// 끌어다 놓은 문서·폴더를 폴더로 옮김 (자기 자신·하위 폴더로는 안 옮김)
+    private func moveDropped(_ urls: [URL], into folder: LibraryItem) -> Bool {
+        var moved = 0
+        for url in urls where url.standardizedFileURL != folder.url.standardizedFileURL {
+            guard let item = items.first(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) else { continue }
+            act("옮기기") {
+                _ = try library.move(item, to: folder.url)
+                moved += 1
+            }
+        }
+        dropTarget = nil
+        if moved > 0 { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+        return moved > 0
     }
 
     @ToolbarContentBuilder

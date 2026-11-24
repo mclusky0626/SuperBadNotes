@@ -128,15 +128,7 @@ final class ElementView: UIView {
 
         glyphGlass?.removeFromSuperview()
         glyphGlass = nil
-        if element.glassText, element.hasText, !element.text.isEmpty, size.width >= 1, size.height >= 1 {
-            // 진짜 Liquid Glass를 글자 모양으로 (타일에는 유리 글자를 안 그림)
-            let inner = CGRect(origin: .zero, size: size).insetBy(dx: element.padding.width, dy: element.padding.height)
-            let outline = GlyphOutline.path(text: element.text, attributes: ElementRenderer.attributes(element), in: inner)
-            let view = GlassShapeHost(path: outline, tint: element.textColor.uiColor.withAlphaComponent(1),
-                                      strength: element.glassTextStrength, frame: CGRect(origin: .zero, size: size))
-            addSubview(view)
-            glyphGlass = view
-        }
+        // 유리 글자는 페이지의 굴절 층(GlassRefraction)이 그림
 
         guard size.width >= 1, size.height >= 1 else { return }
         let view = TiledView(frame: CGRect(origin: .zero, size: size),

@@ -72,7 +72,13 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(newFormat.rawValue, forKey: Keys.newFormat) }
     }
 
+    /// 확대 고정: 손가락으로 벌려도 배율이 안 바뀌고, 페이지를 넘겨도 같은 배율 유지
+    var zoomLocked: Bool {
+        didSet { UserDefaults.standard.set(zoomLocked, forKey: Keys.zoomLocked) }
+    }
+
     private enum Keys {
+        static let zoomLocked = "zoomLocked"
         static let newFormat = "newFormat"
         static let pageTurn = "pageTurn"
         static let twoUpLandscape = "twoUpLandscape"
@@ -89,6 +95,7 @@ final class AppSettings {
         tapToUndo = defaults.object(forKey: Keys.tapToUndo) as? Bool ?? true
         straightHighlighter = defaults.object(forKey: Keys.straightHighlighter) as? Bool ?? true
         pageTurn = defaults.object(forKey: Keys.pageTurn) as? Bool ?? true
+        zoomLocked = defaults.bool(forKey: Keys.zoomLocked)
         newFormat = NoteFormat(rawValue: defaults.string(forKey: Keys.newFormat) ?? "") ?? .pdf
         twoUpLandscape = defaults.object(forKey: Keys.twoUpLandscape) as? Bool ?? true
         #if DEBUG

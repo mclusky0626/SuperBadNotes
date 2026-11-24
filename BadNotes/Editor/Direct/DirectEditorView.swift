@@ -52,6 +52,10 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     private var turning: Bool { flip != nil }
     /// 책처럼 넘기기: 옆으로 끌면 손가락을 따라 종이가 말림
     private let curlPan = UIPanGestureRecognizer()
+    private let doubleTap = UITapGestureRecognizer()
+    /// 확대 고정: 핀치 끄고, 다시 배치(페이지 넘김·회전)해도 이 배율(맞춤 대비) 유지
+    private var zoomLocked = AppSettings.shared.zoomLocked
+    private var lockedRatio: CGFloat = 1
 
     private var laidOutWidth: CGFloat = 0
     private var didInitialScroll = false
@@ -172,6 +176,13 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         bridge.pageAddedAction = { [weak self] page in self?.pageAdded(page) }
         bridge.insertAction = { [weak self] what in self?.insert(what) }
         bridge.turnAction = { [weak self] delta in self?.turn(by: delta) }
+        bridge.zoomAction = { [weak self] percent in self?.setZoom(percent: percent) }
+
+        // 손가락 두 번 톡: 맞춤 ↔ 2배
+        doubleTap.numberOfTapsRequired = 2
+        doubleTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        doubleTap.addTarget(self, action: #selector(handleDoubleTap(_:)))
+        scrollView.addGestureRecognizer(doubleTap)
         bridge.restyleAction = { [weak self] in self?.elements.restyleFromTools() }
         setFingerDrawing(false)
     }
@@ -329,8 +340,9 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
                            : bounds.width / natural.width
         scrollView.minimumZoomScale = fitZoom * 0.5
         scrollView.maximumZoomScale = fitZoom * 12
-        scrollView.zoomScale = fitZoom
+        scrollView.zoomScale = fitZoom * (zoomLocked ? lockedRatio : 1)
         updateInsets()
+        reportZoom()
         if bookMode {
             scrollView.contentOffset = CGPoint(x: -scrollView.contentInset.left, y: -scrollView.contentInset.top)
         }
@@ -355,6 +367,46 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         scrollView.zoomScale = boardZoom
         updateInsets()
     }
+
+    /// 화이트보드: 보는 곳이나 쓴 것이 가장자리에 가까워지면 그쪽으로 판을 늘림 (작게 시작해서 필요한 만큼만)
+    private func growBoardIfNeeded() {
+        guard document.isBoard, !growingBoard, let board = pageViews.first, case .none = action else { return }
+        let margin: CGFloat = 450, step = PaperSpec.boardGrowStep
+        let visible = scrollView.convert(scrollView.bounds, to: board)
+        var watch = visible
+        if let content = document.contentBounds(page: 0) { watch = watch.union(content) }
+        let size = board.bounds.size
+        let left = watch.minX < margin ? step : 0
+        let top = watch.minY < margin ? step : 0
+        let right = watch.maxX > size.width - margin ? step : 0
+        let bottom = watch.maxY > size.height - margin ? step : 0
+        guard left + top + right + bottom > 0 else { return }
+        growingBoard = true
+        defer { growingBoard = false }
+        guard let grown = document.growBoard(left: left, top: top, right: right, bottom: bottom) else { return }
+        let zoom = scrollView.zoomScale
+        let offset = scrollView.contentOffset
+        // 새 크기의 판으로 다시 만듦 (필기·요소는 문서에서 밀린 좌표로)
+        clearSelection()
+        elements.clearSelection()
+        board.removeFromSuperview()
+        guard let page = document.pdf.page(at: 0) else { return }
+        let view = PageView(index: 0, page: page, size: grown.size, ink: PageInk(drawing: document.drawing(for: 0)),
+                            documentLock: document.renderLock, board: true)
+        pageViews[0] = view
+        contentView.addSubview(view)
+        elements.refresh(view)
+        boardZoom = zoom
+        layoutBoard()
+        scrollView.contentOffset = CGPoint(x: offset.x + grown.shift.x * zoom, y: offset.y + grown.shift.y * zoom)
+        if grown.shift != .zero {
+            // 왼쪽·위로 늘리면 좌표가 밀려서 예전 실행 취소 기록은 못 씀
+            history.removeAllActions()
+            refreshUndoState()
+        }
+    }
+
+    private var growingBoard = false
 
     /// 화이트보드를 처음 열 때: 쓴 게 있으면 그 가운데, 없으면 판 한가운데
     private func centerBoard() {
@@ -395,6 +447,51 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         let bottom = max(top, scrollView.contentSize.height - scrollView.bounds.height + scrollView.contentInset.bottom)
         let y = min(max(frame.minY - scrollView.contentInset.top - 12, top), bottom)
         scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: y), animated: animated)
+    }
+
+    // MARK: 배율
+
+    func setZoomLocked(_ locked: Bool) {
+        guard locked != zoomLocked || scrollView.pinchGestureRecognizer?.isEnabled == locked else { return }
+        zoomLocked = locked
+        if locked { lockedRatio = scrollView.zoomScale / max(fitZoom, 0.0001) }
+        scrollView.pinchGestureRecognizer?.isEnabled = !locked
+        bridge.zoomLocked = locked
+    }
+
+    private func reportZoom() {
+        let percent = Int((scrollView.zoomScale / max(fitZoom, 0.0001) * 100).rounded())
+        if bridge.zoomPercent != percent { bridge.zoomPercent = percent }
+    }
+
+    /// nil = 페이지 맞춤, 숫자 = 맞춤 대비 %
+    func setZoom(percent: Double?) {
+        let ratio = CGFloat((percent ?? 100) / 100)
+        let target = min(max(fitZoom * ratio, scrollView.minimumZoomScale), scrollView.maximumZoomScale)
+        if zoomLocked { lockedRatio = target / fitZoom }
+        // 지금 보이는 가운데를 중심으로
+        let visible = scrollView.bounds.inset(by: scrollView.adjustedContentInset)
+        let center = contentView.convert(CGPoint(x: visible.midX, y: visible.midY), from: scrollView)
+        let size = CGSize(width: scrollView.bounds.width / target, height: scrollView.bounds.height / target)
+        if ratio <= 1.001 {
+            scrollView.setZoomScale(target, animated: true)
+        } else {
+            scrollView.zoom(to: CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
+                                       width: size.width, height: size.height), animated: true)
+        }
+    }
+
+    @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+        guard !zoomLocked, !document.isBoard || true else { return }
+        if scrollView.zoomScale > fitZoom * 1.05 {
+            scrollView.setZoomScale(fitZoom, animated: true)
+        } else {
+            let point = gesture.location(in: contentView)
+            let target = fitZoom * 2
+            let size = CGSize(width: scrollView.bounds.width / target, height: scrollView.bounds.height / target)
+            scrollView.zoom(to: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2,
+                                       width: size.width, height: size.height), animated: true)
+        }
     }
 
     // MARK: 책처럼 넘기기
@@ -629,14 +726,20 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        reportZoom()
         updateInsets()
         wetView.refresh()
         elements.updateSelectionFrame()
     }
 
     func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        // 맞춤 근처(±8%)에서 놓으면 딱 맞춤으로 (조금씩 어긋난 배율 때문에 넘기기가 안 되는 일 방지)
+        if !document.isBoard, !zoomLocked, abs(scale / fitZoom - 1) < 0.08, abs(scale - fitZoom) > 0.0001 {
+            scrollView.setZoomScale(fitZoom, animated: true)
+        }
         elements.zoomEnded()
         if elements.selected != nil { elements.presentMenu() }
+        growBoardIfNeeded()
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -647,11 +750,13 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        growBoardIfNeeded()
         if selection != nil { showSelection() }
         if elements.selected != nil { elements.presentMenu() }
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate { growBoardIfNeeded() }
         if !decelerate, elements.selected != nil { elements.presentMenu() }
     }
 
@@ -1061,6 +1166,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         let view = pageViews[page]
         view.invalidateInk(view.ink.replace(with: drawing))
         document.update(drawing, page: page)
+        if document.isBoard { DispatchQueue.main.async { [weak self] in self?.growBoardIfNeeded() } }
     }
 
     private func registerUndo(previous: PKDrawing, current: PKDrawing, page: Int, name: String) {
@@ -1118,9 +1224,9 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         if gestureRecognizer === curlPan {
-            // 확대해서 보는 중에는 옆으로 밀면 스크롤. 옆으로 끌 때만 넘기기 (위아래는 그냥 둠)
+            // 옆으로 스크롤할 게 있으면(가로로 화면보다 크게 확대) 끌면 스크롤. 가로로 다 들어오면 확대 중이어도 넘김
             guard bookMode, !turning, !elements.isEditing, !elements.isDragging,
-                  scrollView.zoomScale <= fitZoom * 1.05 else { return false }
+                  scrollView.contentSize.width <= scrollView.bounds.width + 2 else { return false }
             let v = curlPan.velocity(in: self)
             guard abs(v.x) > abs(v.y) * 1.1 else { return false }
             let delta = v.x < 0 ? 1 : -1
@@ -1295,6 +1401,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     func elementUndoChanged() {
         refreshUndoState()
+        if document.isBoard { DispatchQueue.main.async { [weak self] in self?.growBoardIfNeeded() } }
     }
 
     func elementShowMenu(_ rect: CGRect, in pageView: PageView) {
@@ -1313,6 +1420,13 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     func elementHideMenu() {
         editMenu?.dismissMenu()
+    }
+
+    func elementTransfer(_ point: CGPoint, from page: Int) -> (page: Int, point: CGPoint)? {
+        guard pageViews.indices.contains(page) else { return nil }
+        let inContent = pageViews[page].convert(point, to: contentView)
+        guard let target = pageViews.first(where: { !$0.isHidden && $0.frame.contains(inContent) }) else { return nil }
+        return (target.index, contentView.convert(inContent, to: target))
     }
 
     func elementReveal(_ rect: CGRect, in pageView: PageView) {
@@ -1464,6 +1578,7 @@ struct DirectEditor: UIViewRepresentable {
     let tapToUndo: Bool
     let pageTurn: Bool
     let twoUp: Bool
+    let zoomLocked: Bool
     let insets: EdgeInsets
 
     func makeUIView(context: Context) -> DirectEditorView {
@@ -1477,6 +1592,7 @@ struct DirectEditor: UIViewRepresentable {
         view.setFingerDrawing(fingerDrawing)
         view.setTapToUndo(tapToUndo)
         view.setPageView(book: pageTurn, twoUp: twoUp)
+        view.setZoomLocked(zoomLocked)
         view.chromeInsets = UIEdgeInsets(top: insets.top, left: insets.leading,
                                          bottom: insets.bottom, right: insets.trailing)
     }

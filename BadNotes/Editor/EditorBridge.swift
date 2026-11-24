@@ -27,6 +27,9 @@ final class EditorBridge {
     var imageRequest = 0
     /// 위 막대의 [#] → 바깥 화면이 페이지 이동 창을 띄움
     var jumpRequest = 0
+    /// 지금 배율 (페이지 맞춤 = 100)
+    var zoomPercent = 100
+    var zoomLocked = false
 
     /// 지금 연결된 편집기 (모드를 바꿀 때 예전 편집기가 새 연결을 지우지 않게)
     @ObservationIgnored var owner: ObjectIdentifier?
@@ -41,6 +44,8 @@ final class EditorBridge {
     @ObservationIgnored var turnAction: ((Int) -> Void)?
     /// 도구 막대에서 글자·메모지 모양을 바꿈 → 고른 상자에 적용
     @ObservationIgnored var restyleAction: (() -> Void)?
+    /// 배율 바꾸기: nil = 페이지 맞춤, 숫자 = 맞춤 대비 %
+    @ObservationIgnored var zoomAction: ((Double?) -> Void)?
 
     enum Insert {
         case text(PageElement.Fill)
@@ -56,6 +61,7 @@ final class EditorBridge {
     func turn(_ delta: Int) { turnAction?(delta) }
     func restyle() { restyleAction?() }
     func requestJump() { jumpRequest += 1 }
+    func zoom(_ percent: Double?) { zoomAction?(percent) }
 
     func attach(_ editor: AnyObject) {
         owner = ObjectIdentifier(editor)
@@ -74,6 +80,7 @@ final class EditorBridge {
         insertAction = nil
         turnAction = nil
         restyleAction = nil
+        zoomAction = nil
         isBook = false
         canUndo = false
         canRedo = false

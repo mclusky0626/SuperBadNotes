@@ -20,6 +20,8 @@ protocol ElementHost: AnyObject {
     func elementHideMenu()
     /// 키보드에 가리지 않게 그 영역이 보이도록 스크롤
     func elementReveal(_ rect: CGRect, in pageView: PageView)
+    /// 한 페이지 좌표의 점이 어느 페이지 위에 있는지 (그 페이지 좌표로). 페이지 밖이면 nil
+    func elementTransfer(_ point: CGPoint, from page: Int) -> (page: Int, point: CGPoint)?
 }
 
 final class ElementController: NSObject, UITextViewDelegate {
@@ -271,6 +273,8 @@ final class ElementController: NSObject, UITextViewDelegate {
         guard resize || grabs(point, page: page) else { return false }
         drag = Drag(page: page, id: element.id, resize: resize, start: point, startFrame: element.frame,
                     before: elements(page), frame: element.frame)
+        // 옆 페이지로 넘어가도 가려지지 않게 이 페이지를 맨 앞으로
+        if let pageView = host?.elementPageView(page) { pageView.superview?.bringSubviewToFront(pageView) }
         host?.elementHideMenu()
         return true
     }
@@ -296,9 +300,9 @@ final class ElementController: NSObject, UITextViewDelegate {
                                     height: max(ElementRenderer.fittedHeight(probe), drag.startFrame.height + dy, 60))
             }
         } else {
-            let bounds = pageView.bounds
-            frame.origin.x = min(max(frame.minX + dx, bounds.minX - frame.width * 0.7), bounds.maxX - frame.width * 0.3)
-            frame.origin.y = min(max(frame.minY + dy, bounds.minY - frame.height * 0.7), bounds.maxY - frame.height * 0.3)
+            // 페이지 경계에 안 막힘 (두 쪽 펼침에서 옆 페이지로 옮길 수 있게). 놓을 때 어느 페이지인지 정함
+            frame.origin.x += dx
+            frame.origin.y += dy
         }
         drag.frame = frame
         self.drag = drag
@@ -310,8 +314,25 @@ final class ElementController: NSObject, UITextViewDelegate {
         guard let drag else { return }
         self.drag = nil
         var after = drag.before
-        if !cancelled, let index = after.firstIndex(where: { $0.id == drag.id }), drag.frame != drag.startFrame {
-            after[index].frame = drag.frame
+        if !cancelled, !drag.resize, let index = after.firstIndex(where: { $0.id == drag.id }), drag.frame != drag.startFrame,
+           let landing = host?.elementTransfer(CGPoint(x: drag.frame.midX, y: drag.frame.midY), from: drag.page),
+           landing.page != drag.page {
+            // 다른 페이지 위에 놓음 → 그 페이지로 옮김
+            var moved = after.remove(at: index)
+            moved.frame.origin = CGPoint(x: landing.point.x - moved.frame.width / 2, y: landing.point.y - moved.frame.height / 2)
+            let targetBefore = elements(landing.page)
+            commitPair(source: (drag.page, after, drag.before), target: (landing.page, targetBefore + [moved], targetBefore),
+                       name: "다른 쪽으로 옮기기")
+            select(moved.id, page: landing.page, showMenu: false)
+        } else if !cancelled, let index = after.firstIndex(where: { $0.id == drag.id }), drag.frame != drag.startFrame {
+            var frame = drag.frame
+            if !drag.resize, let pageView = host?.elementPageView(drag.page) {
+                // 페이지 밖에 놓으면 조금은 보이게 당겨 둠
+                let bounds = pageView.bounds
+                frame.origin.x = min(max(frame.minX, bounds.minX - frame.width * 0.7), bounds.maxX - frame.width * 0.3)
+                frame.origin.y = min(max(frame.minY, bounds.minY - frame.height * 0.7), bounds.maxY - frame.height * 0.3)
+            }
+            after[index].frame = frame
             commit(after, previous: drag.before, page: drag.page, name: drag.resize ? "크기 바꾸기" : "옮기기")
         } else if let pageView = host?.elementPageView(drag.page) {
             // 제자리: 미리 보기로 바꾼 모양을 되돌림
@@ -332,6 +353,7 @@ final class ElementController: NSObject, UITextViewDelegate {
         // 도구 막대가 이 상자의 글꼴·색·유리 설정을 보여 줌
         tools?.adopt(element)
         let textView = view.beginEditing(delegate: self, renderScale: renderScale)
+        pageView.scheduleGlass()
         updateSelectionFrame()
         textView.becomeFirstResponder()
         host.elementReveal(element.frame, in: pageView)
@@ -581,6 +603,24 @@ final class ElementController: NSObject, UITextViewDelegate {
             self.selected = nil
             host.elementHideMenu()
         }
+    }
+
+    /// 두 페이지를 한 번에 바꾸고 실행 취소도 한 번에 (페이지 사이로 옮기기)
+    private func commitPair(source: (page: Int, list: [PageElement], previous: [PageElement]),
+                            target: (page: Int, list: [PageElement], previous: [PageElement]), name: String) {
+        guard let host else { return }
+        apply(source.list, page: source.page)
+        apply(target.list, page: target.page)
+        host.elementUndo.registerUndo(withTarget: self) { controller in
+            MainActor.assumeIsolated {
+                controller.endEditing()
+                controller.commitPair(source: (source.page, source.previous, source.list),
+                                      target: (target.page, target.previous, target.list), name: name)
+                controller.updateSelectionFrame()
+            }
+        }
+        host.elementUndo.setActionName(name)
+        host.elementUndoChanged()
     }
 
     private func commit(_ list: [PageElement], previous: [PageElement], page: Int, name: String) {
