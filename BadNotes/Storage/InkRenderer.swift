@@ -45,7 +45,12 @@ nonisolated struct StrokeKey: Hashable, Sendable {
     private let transform: [CGFloat]
     private let ink: String
     private let color: [CGFloat]
-    private let mask: [CGFloat]
+    private var maskHash: Int?
+    var outlineKey: StrokeKey {
+        var key = self
+        key.maskHash = nil
+        return key
+    }
 
     init(_ stroke: PKStroke) {
         created = stroke.path.creationDate.timeIntervalSinceReferenceDate
@@ -57,10 +62,7 @@ nonisolated struct StrokeKey: Hashable, Sendable {
         color = InkRenderer.resolvedColor(stroke.ink.color).components ?? []
         if let path = stroke.mask?.cgPath {
             // 부분 지우개는 마스크를 조금씩 깎아서, 바깥 테두리(bounds)는 그대로인데 모양만 바뀜 → 모양 전체로 구분
-            let m = path.boundingBoxOfPath
-            mask = [m.minX, m.minY, m.width, m.height, CGFloat(Self.fingerprint(path))]
-        } else {
-            mask = []
+            maskHash = Self.fingerprint(path)
         }
     }
 }
@@ -76,12 +78,12 @@ nonisolated struct SampledStroke: @unchecked Sendable {
         case none, path, drawing
     }
 
-    let key: StrokeKey
+    var key: StrokeKey
     /// 경로 좌표 (transform 적용 전)
     let points: [Point]
     let transform: CGAffineTransform
-    let mask: CGPath?
-    let maskSpace: MaskSpace
+    var mask: CGPath?
+    var maskSpace: MaskSpace
     /// 불투명 색. 투명도는 alpha로 따로
     let color: CGColor
     let alpha: CGFloat
@@ -93,6 +95,7 @@ nonisolated struct SampledStroke: @unchecked Sendable {
     var imprint: BrushImprint? = nil
     /// 유리펜 획이면 진하기 (0~1), 아니면 nil
     var glassStrength: CGFloat? = nil
+    var glassOutline: CGPath? = nil
     /// Apple 필기 도구로 그은 획(또는 표시 없는 예전 획): 화면에서는 Apple 렌더러로 그림
     var appleSource: PKStroke? = nil
 
@@ -178,6 +181,8 @@ nonisolated enum InkRenderer {
 
         var bounds = stroke.renderBounds
         if let imprint { bounds = bounds.union(imprint.bounds.applying(stroke.transform)) }
+        let meanWidth = points.isEmpty ? nominal : widthSum / count
+        let isGlass = GlassInk.isGlass(stroke)
         return SampledStroke(
             key: key ?? StrokeKey(stroke),
             points: points,
@@ -187,12 +192,13 @@ nonisolated enum InkRenderer {
             color: color.copy(alpha: 1) ?? color,
             alpha: alpha,
             blend: look.blend,
-            meanWidth: points.isEmpty ? nominal : widthSum / count,
+            meanWidth: meanWidth,
             // 유리펜은 그림자·빛 테두리만큼 조금 넓게
             bounds: bounds.insetBy(dx: -1 - (GlassInk.isGlass(stroke) ? nominal * 0.6 : 0),
                                                 dy: -1 - (GlassInk.isGlass(stroke) ? nominal * 0.8 : 0)),
             imprint: imprint,
-            glassStrength: GlassInk.isGlass(stroke) ? GlassInk.strength(stroke.randomSeed) : nil,
+            glassStrength: isGlass ? GlassInk.strength(stroke.randomSeed) : nil,
+            glassOutline: isGlass ? GlassInk.outline(centerline: centerline(points, smooth: true), width: meanWidth) : nil,
             appleSource: InkOrigin.isBadNotes(stroke.randomSeed) ? nil : stroke
         )
     }
@@ -230,10 +236,10 @@ nonisolated enum InkRenderer {
         if let strength = s.glassStrength {
             // 유리펜: 가운데선 → 둥근 윤곽 → 유리로 (화면은 부드러운 곡선 + 그라데이션, PDF는 직선 + 면)
             if alphaMultiplier < 0.999 { context.setAlpha(alphaMultiplier) }
-            let line = centerline(s.points, smooth: smooth)
-            let width = s.meanWidth
-            GlassInk.draw(outline: GlassInk.outline(centerline: line, width: width), tint: s.color, strength: strength,
-                          thickness: width, forPDF: !smooth, in: context)
+            let outline = (smooth ? s.glassOutline : nil)
+                ?? GlassInk.outline(centerline: centerline(s.points, smooth: smooth), width: s.meanWidth)
+            GlassInk.draw(outline: outline, tint: s.color, strength: strength,
+                          thickness: s.meanWidth, forPDF: !smooth, in: context)
             context.restoreGState()
             return
         }

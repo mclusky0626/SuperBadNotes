@@ -1,60 +1,88 @@
-//
-//  GlassShape.swift
-//  BadNotes
-//
-//  진짜 Apple Liquid Glass를 아무 모양으로: SwiftUI `.glassEffect(_:in:)`에 글자·획 윤곽을 모양으로 넘김.
-//  → 테두리 굴절·반사광까지 Apple이 그 모양을 따라 그림 (UIGlassEffect는 사각·둥근 모양만 됨).
-//  유리 글자와 Liquid Glass 펜 획이 화면에서는 이걸로 그려짐. 흉내 그림은 PDF 파일(다른 앱용)에만.
-//
-
 import SwiftUI
 import UIKit
 
-/// CGPath를 SwiftUI 모양으로 (좌표 그대로)
-struct PathShape: Shape {
+/// 윤곽은 자체 프레임의 좌표로 보관하고, 프레임 위치로 페이지 위에 배치한다.
+struct GlassMark {
     let path: CGPath
-
-    func path(in rect: CGRect) -> Path {
-        Path(path)
-    }
-}
-
-struct GlassShapeView: View {
-    let path: CGPath
+    var frame: CGRect
     let tint: Color
-    /// 0 거의 투명 ~ 1 진한 색 유리
     let strength: Double
 
-    var body: some View {
-        Color.clear
-            .glassEffect(Glass.clear.tint(tint.opacity(0.12 + strength * 0.7)), in: PathShape(path: path))
-            .allowsHitTesting(false)
+    init?(outline: CGPath, tint: UIColor, strength: Double) {
+        let box = outline.boundingBoxOfPath
+        guard !box.isNull, !box.isEmpty else { return nil }
+        frame = box.insetBy(dx: -1, dy: -1).integral
+        var local = CGAffineTransform(translationX: -frame.minX, y: -frame.minY)
+        guard let path = outline.copy(using: &local) else { return nil }
+        self.path = path
+        self.tint = Color(uiColor: tint)
+        self.strength = strength
+    }
+
+    init?(stroke s: SampledStroke) {
+        guard let strength = s.glassStrength, var outline = s.glassOutline else { return nil }
+        if s.maskSpace == .path, let mask = s.mask { outline = outline.intersection(mask) }
+        var transform = s.transform
+        guard var placed = outline.copy(using: &transform) else { return nil }
+        if s.maskSpace == .drawing, let mask = s.mask { placed = placed.intersection(mask) }
+        self.init(outline: placed, tint: UIColor(cgColor: s.color), strength: Double(strength))
     }
 }
 
-/// UIKit 화면(페이지·글상자) 안에 까는 SwiftUI 유리
-final class GlassShapeHost: UIView {
-    private let host: UIHostingController<GlassShapeView>
+private struct PathShape: Shape {
+    let outline: CGPath
+    func path(in rect: CGRect) -> Path { Path(outline) }
+}
 
-    init(path: CGPath, tint: UIColor, strength: Double, frame: CGRect) {
-        host = UIHostingController(rootView: GlassShapeView(path: path, tint: Color(uiColor: tint), strength: strength))
+struct GlassMarks: View {
+    let marks: [GlassMark]
+    let frame: CGRect
+
+    var body: some View {
+        GlassEffectContainer(spacing: 0) {
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                ForEach(marks.indices, id: \.self) { index in
+                    let mark = marks[index]
+                    let material = Glass.clear.tint(mark.tint.opacity(mark.strength))
+                    Color.clear
+                        .frame(width: mark.frame.width, height: mark.frame.height)
+                        .glassEffect(material, in: PathShape(outline: mark.path))
+                        .offset(x: mark.frame.minX - frame.minX, y: mark.frame.minY - frame.minY)
+                }
+            }
+        }
+        .frame(width: frame.width, height: frame.height, alignment: .topLeading)
+        .environment(\.layoutDirection, .leftToRight)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+final class GlassShapeHost: UIView {
+    private let content: UIView & UIContentView
+
+    init(marks: [GlassMark]) {
+        let frame = marks.reduce(CGRect.null) { $0.union($1.frame) }
+        content = Self.configuration(marks, frame: frame).makeContentView()
         super.init(frame: frame)
         isUserInteractionEnabled = false
         backgroundColor = .clear
-        host.view.backgroundColor = .clear
-        host.view.isUserInteractionEnabled = false
-        host.sizingOptions = []
-        host.safeAreaRegions = []
-        host.view.frame = bounds
-        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        addSubview(host.view)
+        content.backgroundColor = .clear
+        content.frame = bounds
+        content.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(content)
     }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func update(_ marks: [GlassMark]) {
+        frame = marks.reduce(CGRect.null) { $0.union($1.frame) }
+        content.configuration = Self.configuration(marks, frame: frame)
     }
 
-    func update(path: CGPath, tint: UIColor, strength: Double) {
-        host.rootView = GlassShapeView(path: path, tint: Color(uiColor: tint), strength: strength)
+    private static func configuration(_ marks: [GlassMark], frame: CGRect) -> some UIContentConfiguration {
+        UIHostingConfiguration { GlassMarks(marks: marks, frame: frame) }
+            .margins(.all, 0)
     }
 }

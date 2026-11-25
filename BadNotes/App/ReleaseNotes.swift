@@ -12,6 +12,12 @@ struct AppRelease: Identifiable {
     var id: String { version }
 
     static let history = [
+        AppRelease(version: "1.5.1", changes: [
+            Change(icon: "eraser", title: "부분 지우개 반응 개선",
+                   detail: "노트에서 문지른 자리만 지워져요. 유리펜도 지운 상태로 저장하고 다시 열 수 있어요."),
+            Change(icon: "drop.halffull", title: "펜과 글자에 Liquid Glass 적용",
+                   detail: "유리펜의 곡선과 글자 획을 따라 iPadOS의 유리 재질이 적용돼요. 사진이나 필기 위에서 배경이 굴절되는 모습을 볼 수 있어요.")
+        ]),
         AppRelease(version: "1.5", changes: [
             Change(icon: "book.pages", title: "화면 반씩 쓰는 가로 노트",
                    detail: "책등이 화면 한가운데에 오도록 두 쪽을 펼쳐요. 도구 막대 주변 여백도 줄여서 더 넓게 쓸 수 있어요."),

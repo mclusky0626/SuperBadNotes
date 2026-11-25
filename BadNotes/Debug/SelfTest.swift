@@ -51,6 +51,7 @@ nonisolated enum SelfTest {
             journalTests(root: root, results)
             inkEngineTests(results)
             try brushTests(root: root, results)
+            try await badnoteEraseTests(root: root, results)
             highlighterTests(results)
             await pencilKitMatchTests(results)
             try await documentTests(root: root, results)
@@ -68,6 +69,66 @@ nonisolated enum SelfTest {
         }
         try? FileManager.default.removeItem(at: root)
         print("[SELFTEST] DONE passed=\(results.passed) failed=\(results.failed)")
+    }
+
+    @MainActor
+    private static func badnoteEraseTests(root: URL, _ r: Results) throws {
+        let url = root.appendingPathComponent("Eraser.badnote")
+        try makePDF(url)
+        let blue = line(.monoline, .blue, CGPoint(x: 20, y: 30), CGPoint(x: 210, y: 30), width: 12)
+        let glass = PKStroke(ink: blue.ink, path: blue.path, transform: CGAffineTransform(translationX: 5, y: 20),
+                             mask: nil, randomSeed: GlassInk.seed(strength: 0.45))
+        var strokes = [glass]
+        for row in 0..<24 {
+            for col in 0..<16 {
+                let x = CGFloat(col * 34 + 15), y = CGFloat(row * 18 + 90)
+                strokes.append(line(.monoline, .black, CGPoint(x: x, y: y), CGPoint(x: x + 24, y: y + 3), width: 4))
+            }
+        }
+        var word = PageElement(kind: .text, x: 0, y: 600, width: 180, height: 50)
+        word.text = "유리 Glass"
+        word.glassText = true
+        _ = try PDFInkWriter.apply(content: [0: PageContent(drawing: PKDrawing(strokes: strokes), elements: [word])],
+                                   images: [:], to: url)
+        let saved = try NoteLoader.load(url)
+        guard let original = saved.drawings[0] else { throw TestError(description: "부분 지우개 노트 열기") }
+        let page = PageInk(drawing: original)
+        let initial = page.sampledStrokes()
+        let sweep = StrokeEditing.Sweep(from: CGPoint(x: 75, y: 65),
+                                        through: [CGPoint(x: 75, y: 30), CGPoint(x: 140, y: 30), CGPoint(x: 140, y: 65)],
+                                        radius: 7)
+        r.check(".badnote: 형광펜만 지우면 유리펜 보존", page.erase(sweep, partial: true, highlightersOnly: true).isNull)
+        let area = page.erase(sweep, partial: true, highlightersOnly: false)
+        r.check(".badnote: 획의 바뀐 구간만 다시 그림", !area.isNull && !area.contains(CGPoint(x: 34, y: 50)))
+        let changed = page.sampledStrokes()
+        r.check(".badnote: 손대지 않은 필기와 유리펜 원래 윤곽 유지", changed.count == initial.count
+                && changed[0].glassOutline === initial[0].glassOutline && changed.last?.key == initial.last?.key)
+        r.check(".badnote: 지운 곳을 다시 지나가면 변경 없음",
+                page.erase(sweep, partial: true, highlightersOnly: false).isNull)
+        _ = try PDFInkWriter.apply(content: [0: PageContent(drawing: page.currentDrawing(), elements: [word])], images: [:], to: url)
+        let reopened = try NoteLoader.load(url)
+        guard let stroke = reopened.drawings[0]?.strokes.first, let mark = GlassMark(stroke: InkRenderer.sample(stroke))
+        else { throw TestError(description: "저장한 유리펜 윤곽") }
+        func visible(_ x: CGFloat) -> Bool { mark.path.contains(CGPoint(x: x - mark.frame.minX, y: 50 - mark.frame.minY)) }
+        r.check(".badnote: 다시 열어도 두 군데 지운 자리는 비고 가운데와 양끝은 남음",
+                !visible(75) && !visible(140) && visible(40) && visible(108) && visible(180))
+        r.check(".badnote: 지우고 저장한 뒤에도 유리 글자와 펜의 진하기 유지",
+                reopened.elements[0]?.first == word && stroke.randomSeed == glass.randomSeed)
+
+        var timings: [Double] = []
+        for row in 0..<24 {
+            let y = CGFloat(row * 18 + 90)
+            let motion = StrokeEditing.Sweep(from: CGPoint(x: 25, y: y - 5),
+                                             through: [CGPoint(x: 25, y: y + 7)], radius: 4)
+            let start = CACurrentMediaTime()
+            let dirty = page.erase(motion, partial: true, highlightersOnly: false)
+            if !dirty.isNull { timings.append((CACurrentMediaTime() - start) * 1000) }
+        }
+        r.check(".badnote: 385획 페이지에서 24번 연속 부분 지우기", timings.count == 24)
+        if !timings.isEmpty {
+            let p95 = timings.sorted()[Int(ceil(Double(timings.count) * 0.95)) - 1]
+            print("[SELFTEST] INFO 부분 지우개 385획, 24회 엔진 p95 \(String(format: "%.2f", p95)) ms")
+        }
     }
 
     // MARK: 저장 엔진

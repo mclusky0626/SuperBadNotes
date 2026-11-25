@@ -615,7 +615,7 @@ struct GlassStrengthButton: View {
         .popover(isPresented: $open, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 14) {
                 Text(title).font(.headline)
-                Image(uiImage: GlassPreview.image(tint: tint, strength: value, sample: sample))
+                GlassPreview(tint: tint, strength: value, sample: sample)
                     .frame(maxWidth: .infinity)
                     .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(white: 0.97)))
                 HStack {
@@ -640,36 +640,38 @@ struct GlassStrengthButton: View {
 }
 
 /// 유리 미리보기 그림 (줄 친 종이 위에 유리 획 또는 유리 글자)
-enum GlassPreview {
-    static func image(tint: RGBAColor, strength: Double, sample: String?) -> UIImage {
-        let size = CGSize(width: 284, height: 84)
-        return UIGraphicsImageRenderer(size: size).image { ctx in
-            let cg = ctx.cgContext
-            UIColor(white: 0.98, alpha: 1).setFill()
-            cg.fill(CGRect(origin: .zero, size: size))
-            cg.setStrokeColor(UIColor(red: 0.75, green: 0.8, blue: 0.9, alpha: 1).cgColor)
-            cg.setLineWidth(1)
-            for y in stride(from: 14.0, to: size.height, by: 14) {
-                cg.move(to: CGPoint(x: 0, y: y))
-                cg.addLine(to: CGPoint(x: size.width, y: y))
+struct GlassPreview: View {
+    let tint: RGBAColor
+    let strength: Double
+    let sample: String?
+
+    var body: some View {
+        let rect = CGRect(x: 0, y: 0, width: 284, height: 84)
+        ZStack {
+            Canvas { context, size in
+                var lines = Path()
+                for y in stride(from: 14.0, to: size.height, by: 14) {
+                    lines.move(to: CGPoint(x: 0, y: y))
+                    lines.addLine(to: CGPoint(x: size.width, y: y))
+                }
+                context.stroke(lines, with: .color(.blue.opacity(0.24)), lineWidth: 1)
             }
-            cg.strokePath()
-            let outline: CGPath
-            let thickness: CGFloat
-            if let sample {
-                let font = UIFont.systemFont(ofSize: 56, weight: .heavy)
-                outline = GlyphOutline.path(text: sample, attributes: [.font: font], in: CGRect(x: 20, y: 6, width: 260, height: 80))
-                thickness = 5
-            } else {
-                let line = CGMutablePath()
-                line.move(to: CGPoint(x: 24, y: 52))
-                line.addCurve(to: CGPoint(x: 260, y: 36), control1: CGPoint(x: 100, y: 0), control2: CGPoint(x: 170, y: 90))
-                thickness = 14
-                outline = GlassInk.outline(centerline: line, width: thickness)
+            if let mark = GlassMark(outline: outline, tint: tint.uiColor, strength: strength) {
+                GlassMarks(marks: [mark], frame: rect)
             }
-            GlassInk.draw(outline: outline, tint: tint.uiColor.withAlphaComponent(1).cgColor, strength: CGFloat(strength),
-                          thickness: thickness, forPDF: false, in: cg)
         }
+        .frame(width: rect.width, height: rect.height)
+    }
+
+    private var outline: CGPath {
+        if let sample {
+            return GlyphOutline.path(text: sample, attributes: [.font: UIFont.systemFont(ofSize: 56, weight: .heavy)],
+                                     in: CGRect(x: 20, y: 6, width: 260, height: 80))
+        }
+        let line = CGMutablePath()
+        line.move(to: CGPoint(x: 24, y: 52))
+        line.addCurve(to: CGPoint(x: 260, y: 36), control1: CGPoint(x: 100, y: 0), control2: CGPoint(x: 170, y: 90))
+        return GlassInk.outline(centerline: line, width: 14)
     }
 }
 
@@ -841,29 +843,38 @@ struct SizeEditor: View {
     }
 
     private var preview: some View {
-        Canvas { context, size in
-            let width = min(value, size.height - 8)
+        GeometryReader { geometry in
+            let size = geometry.size
             if tools.tool == .eraser {
                 let d = min(value, size.height - 6)
-                let rect = CGRect(x: size.width / 2 - d / 2, y: size.height / 2 - d / 2, width: d, height: d)
-                context.stroke(Path(ellipseIn: rect), with: .color(.gray), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                return
-            }
-            var builder = tools.makeStrokeBuilder(startTime: 0, width: width, salt: 17)
-            for i in 0...60 {
-                let t = CGFloat(i) / 60
-                let x = 18 + (size.width - 36) * t
-                let amplitude = tools.inkTool == .highlighter ? 0 : max(0, (size.height - width * 2.8) / 2 - 5)
-                let y = size.height / 2 + sin(t * .pi * 2) * amplitude
-                builder.add(InputSample(location: CGPoint(x: x, y: y), time: Double(i) / 120,
-                                        force: 0.06 + 0.62 * sin(t * .pi), azimuth: .pi * 0.75,
-                                        altitude: .pi / 2 - sin(t * .pi) * 0.85))
-            }
-            if let stroke = builder.makeStroke() {
-                let sampled = InkRenderer.sample(stroke)
-                context.withCGContext { InkRenderer.draw(sampled, in: $0, smooth: true) }
+                Circle().stroke(.gray, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                    .frame(width: d, height: d)
+                    .position(x: size.width / 2, y: size.height / 2)
+            } else if let stroke = previewStroke(size) {
+                if let mark = GlassMark(stroke: stroke) {
+                    GlassMarks(marks: [mark], frame: CGRect(origin: .zero, size: size))
+                } else {
+                    Canvas { context, _ in
+                        context.withCGContext { InkRenderer.draw(stroke, in: $0, smooth: true) }
+                    }
+                }
             }
         }
+    }
+
+    private func previewStroke(_ size: CGSize) -> SampledStroke? {
+        let width = min(value, size.height - 8)
+        var builder = tools.makeStrokeBuilder(startTime: 0, width: width, salt: 17)
+        for i in 0...60 {
+            let t = CGFloat(i) / 60
+            let x = 18 + (size.width - 36) * t
+            let amplitude = tools.inkTool == .highlighter ? 0 : max(0, (size.height - width * 2.8) / 2 - 5)
+            let y = size.height / 2 + sin(t * .pi * 2) * amplitude
+            builder.add(InputSample(location: CGPoint(x: x, y: y), time: Double(i) / 120,
+                                    force: 0.06 + 0.62 * sin(t * .pi), azimuth: .pi * 0.75,
+                                    altitude: .pi / 2 - sin(t * .pi) * 0.85))
+        }
+        return builder.makeStroke().map { InkRenderer.sample($0) }
     }
 }
 

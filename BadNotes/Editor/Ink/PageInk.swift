@@ -11,7 +11,8 @@ import UIKit
 
 nonisolated final class PageInk: @unchecked Sendable {
     private let lock = NSLock()
-    private var drawing: PKDrawing
+    private var strokes: [PKStroke]
+    private var drawing: PKDrawing?
     private var sampled: [SampledStroke]?
     private var cache: [StrokeKey: SampledStroke] = [:]
     /// 올가미로 옮기는 동안 타일에서 숨기는 획 번호
@@ -22,6 +23,7 @@ nonisolated final class PageInk: @unchecked Sendable {
     private var drawn: [StrokeKey: [(rect: CGRect, time: CFTimeInterval)]] = [:]
 
     init(drawing: PKDrawing) {
+        strokes = drawing.strokes
         self.drawing = drawing
     }
 
@@ -80,7 +82,12 @@ nonisolated final class PageInk: @unchecked Sendable {
     }
 
     func currentDrawing() -> PKDrawing {
-        lock.withLock { drawing }
+        lock.withLock {
+            if let drawing { return drawing }
+            let result = PKDrawing(strokes: strokes)
+            drawing = result
+            return result
+        }
     }
 
     /// drawing.strokes와 같은 순서
@@ -88,16 +95,69 @@ nonisolated final class PageInk: @unchecked Sendable {
         lock.withLock { ensureSampled() }
     }
 
+    /// 지우개는 마스크만 바꾼다. 펜촉·흑연 입자·보간점은 그대로 쓰고, 타일에는 한 번에 반영한다.
+    func erase(_ sweep: StrokeEditing.Sweep, partial: Bool, highlightersOnly: Bool) -> CGRect {
+        let (samples, source) = lock.withLock { (ensureSampled(), strokes) }
+        let candidates = samples.indices.filter { samples[$0].bounds.intersects(sweep.bounds) }
+        guard !candidates.isEmpty else { return .null }
+        var dirty = CGRect.null
+        var removed = IndexSet()
+        var edits: [(index: Int, stroke: PKStroke, sample: SampledStroke)] = []
+        for index in candidates {
+            let s = samples[index], stroke = source[index]
+            if highlightersOnly && !StrokeEditing.isHighlighter(stroke) { continue }
+            if partial {
+                guard let cut = StrokeEditing.erase(stroke, sampled: s, sweep: sweep) else { continue }
+                if let masked = cut.first {
+                    var changed = s
+                    changed.key = StrokeKey(masked)
+                    changed.mask = masked.mask?.cgPath
+                    changed.maskSpace = .path
+                    if s.appleSource != nil { changed.appleSource = masked }
+                    edits.append((index, masked, changed))
+                    let padding = max(4 * s.widthScale, sweep.radius * 2 + s.widthScale)
+                    dirty = dirty.union(s.bounds.intersection(sweep.bounds.insetBy(dx: -padding, dy: -padding)))
+                    continue
+                }
+            } else if !StrokeEditing.touches(s, sweep: sweep) { continue }
+            removed.insert(index)
+            dirty = dirty.union(s.bounds)
+        }
+        guard !edits.isEmpty || !removed.isEmpty else { return .null }
+        // 타일은 한 번에 갱신하고, 저장·실행 취소에 필요한 PKDrawing은 손을 뗐을 때 만든다.
+        lock.withLock {
+            for index in edits.map(\.index) + Array(removed) {
+                let old = samples[index].key
+                cache[old] = nil
+                pending.remove(old)
+                drawn[old] = nil
+            }
+            for edit in edits {
+                strokes[edit.index] = edit.stroke
+                sampled?[edit.index] = edit.sample
+                cache[edit.sample.key] = edit.sample
+            }
+            if !removed.isEmpty {
+                let ranges = RangeSet(removed.rangeView)
+                strokes.removeSubranges(ranges)
+                sampled?.removeSubranges(ranges)
+            }
+            drawing = nil
+        }
+        return dirty
+    }
+
     /// 새 필기로 바꾸고 다시 그려야 할 영역을 돌려줌. 숨긴 획도 다시 보이게 함
     @discardableResult
     func replace(with new: PKDrawing) -> CGRect {
-        lock.withLock {
+        let newStrokes = new.strokes
+        return lock.withLock {
             let old = ensureSampled()
             let wasHidden = hidden
             var nextCache: [StrokeKey: SampledStroke] = [:]
             var next: [SampledStroke] = []
-            next.reserveCapacity(new.strokes.count)
-            for stroke in new.strokes {
+            next.reserveCapacity(newStrokes.count)
+            for stroke in newStrokes {
                 let key = StrokeKey(stroke)
                 let s = nextCache[key] ?? cache[key] ?? InkRenderer.sample(stroke, key: key)
                 nextCache[key] = s
@@ -111,6 +171,7 @@ nonisolated final class PageInk: @unchecked Sendable {
             for s in next where !oldKeys.contains(s.key) { dirty = dirty.union(s.bounds) }
             for index in wasHidden where old.indices.contains(index) { dirty = dirty.union(old[index].bounds) }
 
+            strokes = newStrokes
             drawing = new
             sampled = next
             cache = nextCache
@@ -135,8 +196,8 @@ nonisolated final class PageInk: @unchecked Sendable {
     private func ensureSampled() -> [SampledStroke] {
         if let sampled { return sampled }
         var result: [SampledStroke] = []
-        result.reserveCapacity(drawing.strokes.count)
-        for stroke in drawing.strokes {
+        result.reserveCapacity(strokes.count)
+        for stroke in strokes {
             let key = StrokeKey(stroke)
             let s = cache[key] ?? InkRenderer.sample(stroke, key: key)
             cache[key] = s

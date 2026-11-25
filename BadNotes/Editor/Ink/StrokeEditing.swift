@@ -20,19 +20,41 @@ nonisolated enum StrokeEditing {
         return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
     }
 
-    private static func segmentBounds(_ a: CGPoint, _ b: CGPoint, radius: CGFloat) -> CGRect {
-        CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(b.x - a.x), height: abs(b.y - a.y))
-            .insetBy(dx: -radius, dy: -radius)
+    /// 한 입력 이벤트 안의 실제 펜슬 위치를 연결한 지우개 자국 (페이지 좌표).
+    struct Sweep {
+        let path: CGPath
+        let bounds: CGRect
+        let radius: CGFloat
+
+        init(from start: CGPoint, through points: [CGPoint], radius: CGFloat) {
+            self.radius = radius
+            let trail = CGMutablePath()
+            trail.move(to: start)
+            for point in points where point != trail.currentPoint { trail.addLine(to: point) }
+            if trail.isEmpty || trail.boundingBoxOfPath.size == .zero {
+                path = CGPath(ellipseIn: CGRect(origin: start, size: .zero).insetBy(dx: -radius, dy: -radius), transform: nil)
+            } else {
+                path = trail.copy(strokingWithWidth: radius * 2, lineCap: .round, lineJoin: .round, miterLimit: 1)
+            }
+            bounds = path.boundingBoxOfPath
+        }
+
+        func bite(in s: SampledStroke) -> CGPath? {
+            guard s.bounds.intersects(bounds) else { return nil }
+            if s.transform.isIdentity { return path }
+            var inverse = s.transform.inverted()
+            return path.copy(using: &inverse)
+        }
     }
 
-    /// 지우개가 지나간 선분(a→b, 반지름 radius)이 획에 닿는지
     /// 획이 실제로 칠하는 모양 (경로 좌표, 가장 굵은 곳 기준). 지우개 판정에 씀 — 가운데 점만 보면
     /// 가운데를 지운 뒤 양옆에 남은 가는 조각이 영영 안 지워졌음
     private static let outlineCache = NSCache<NSNumber, CGPath>()
 
     static func inkOutline(_ s: SampledStroke) -> CGPath {
+        if let glass = s.glassOutline { return glass }
         if case let .fountain(outline) = s.imprint { return outline }
-        let id = NSNumber(value: s.key.hashValue)
+        let id = NSNumber(value: s.key.outlineKey.hashValue)
         if let hit = outlineCache.object(forKey: id) { return hit }
         // 화면에 그리는 것과 같은 곡선 + 넉넉한 굵기 (Apple 렌더러·곡선 바깥으로 삐져나온 잉크까지 덮게)
         let scale = max(s.widthScale, 0.01)
@@ -55,30 +77,26 @@ nonisolated enum StrokeEditing {
         }
     }
 
-    /// 지우개 자국 (그림 좌표의 선분 a→b, 반지름 radius) → 획의 경로 좌표
-    private static func bite(_ s: SampledStroke, from a: CGPoint, to b: CGPoint, radius: CGFloat) -> CGPath? {
-        let trail = CGMutablePath()
-        trail.move(to: a)
-        trail.addLine(to: b == a ? CGPoint(x: a.x + 0.01, y: a.y) : b)
-        var inverse = s.transform.inverted()
-        return trail.copy(strokingWithWidth: radius * 2, lineCap: .round, lineJoin: .round, miterLimit: 1).copy(using: &inverse)
+    static func touches(_ s: SampledStroke, sweep: Sweep) -> Bool {
+        guard let bite = sweep.bite(in: s) else { return false }
+        return visibleInk(s).intersects(bite)
     }
 
-    /// 지우개가 지나간 선분(a→b, 반지름 radius)이 획의 '보이는 잉크'에 닿는지
     static func touches(_ s: SampledStroke, from a: CGPoint, to b: CGPoint, radius: CGFloat) -> Bool {
-        let area = segmentBounds(a, b, radius: radius)
-        guard s.bounds.intersects(area), let bite = bite(s, from: a, to: b, radius: radius) else { return false }
-        let ink = visibleInk(s)
-        guard ink.boundingBoxOfPath.intersects(bite.boundingBoxOfPath) else { return false }
-        return ink.intersects(bite)
+        touches(s, sweep: Sweep(from: a, through: [b], radius: radius))
     }
 
-    /// 부분 지우개: 획 모양(경로·굵기·질감)은 그대로 두고, 보이는 영역(마스크)에서 지우개 자국만 뺌.
-    /// 안 닿았으면 nil, 남은 잉크가 없으면 빈 배열
     static func erase(_ stroke: PKStroke, sampled: SampledStroke, from a: CGPoint, to b: CGPoint,
                       radius: CGFloat) -> [PKStroke]? {
-        guard touches(sampled, from: a, to: b, radius: radius),
-              let bite = bite(sampled, from: a, to: b, radius: radius) else { return nil }
+        erase(stroke, sampled: sampled, sweep: Sweep(from: a, through: [b], radius: radius))
+    }
+
+    /// nil이면 안 닿았고, 빈 배열이면 획 전체를 지웠다.
+    static func erase(_ stroke: PKStroke, sampled: SampledStroke, sweep: Sweep) -> [PKStroke]? {
+        guard let bite = sweep.bite(in: sampled) else { return nil }
+        let radius = sweep.radius / max(sampled.widthScale, 0.01)
+        let outline = inkOutline(sampled)
+        guard outline.intersects(bite) else { return nil }
         var inverse = stroke.transform.inverted()
         let visible: CGPath
         if let mask = stroke.mask?.cgPath, sampled.maskSpace != .drawing {
@@ -91,20 +109,24 @@ nonisolated enum StrokeEditing {
             let area = sampled.bounds.applying(inverse).insetBy(dx: -margin, dy: -margin)
             visible = CGPath(rect: area, transform: nil)
         }
+        if sampled.mask != nil, !visible.intersection(bite).intersects(outline) { return nil }
         var remaining = visible.subtracting(bite)
+        let pieces = outline.intersection(remaining).componentsSeparated()
         // 지우개 자국 가까이에 남은 작은 조각(부스러기)은 같이 지움
         let crumb = max(3, radius * 0.9)
         let near = bite.boundingBoxOfPath.insetBy(dx: -radius, dy: -radius)
         let crumbs = CGMutablePath()
-        for piece in inkOutline(sampled).intersection(remaining).componentsSeparated() {
+        var leftover = CGRect.null
+        for piece in pieces {
             let box = piece.boundingBoxOfPath
-            if box.width < crumb, box.height < crumb, box.intersects(near) { crumbs.addRect(box.insetBy(dx: -0.75, dy: -0.75)) }
+            if box.width < crumb, box.height < crumb, box.intersects(near) {
+                crumbs.addRect(box.insetBy(dx: -0.75, dy: -0.75))
+            } else {
+                leftover = leftover.union(box)
+            }
         }
+        guard !leftover.isNull, min(leftover.width, leftover.height) > 0.35 else { return [] }
         if !crumbs.isEmpty { remaining = remaining.subtracting(crumbs) }
-        // 남은 마스크 안에 실제 잉크가 거의 없으면(부스러기 포함) 획째 지움
-        // 경계에 생기는 계산 부스러기(머리카락처럼 가는 조각)는 남은 걸로 치지 않음
-        let leftover = inkOutline(sampled).intersection(remaining).boundingBoxOfPath
-        guard !remaining.isEmpty, !leftover.isNull, min(leftover.width, leftover.height) > 0.35 else { return [] }
         return [PKStroke(ink: stroke.ink, path: stroke.path, transform: stroke.transform,
                          mask: UIBezierPath(cgPath: remaining), randomSeed: stroke.randomSeed)]
     }

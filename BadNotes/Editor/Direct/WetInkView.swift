@@ -24,10 +24,11 @@ final class WetInkView: UIView {
     }
 
     private var active: SampledStroke?
-    private weak var activePage: UIView?
+    private weak var activePage: PageView?
     private var settling: [Settling] = []
     private var moving: [SampledStroke] = []
-    private weak var movingPage: UIView?
+    private var movingGlass: [GlassMark] = []
+    private weak var movingPage: PageView?
     private var movingOffset: CGVector = .zero
     private var lasso: [CGPoint] = []
     private weak var lassoPage: UIView?
@@ -60,30 +61,43 @@ final class WetInkView: UIView {
 
     // MARK: 바꾸기
 
-    func setActive(_ stroke: PKStroke?, page: UIView?) {
+    func setActive(_ stroke: PKStroke?, page: PageView?) {
+        if activePage !== page { activePage?.setTransientGlass([]) }
         active = stroke.map { InkRenderer.sample($0) }
         activePage = page
+        if let active, let mark = GlassMark(stroke: active) {
+            page?.setTransientGlass([mark])
+        } else { page?.setTransientGlass([]) }
         refresh()
     }
 
     /// 펜을 뗀 획은 페이지 타일이 그릴 때까지 여기서 계속 보여 줌
     func settle(_ stroke: PKStroke, page: UIView, ink: PageInk) {
         let key = StrokeKey(stroke)
+        if GlassInk.isGlass(stroke) { ink.clearPending(key); return }
         settling.append(Settling(stroke: InkRenderer.sample(stroke, key: key), page: page, ink: ink, key: key,
                                  start: CACurrentMediaTime(), offset: .zero))
         startTicking()
         refresh()
     }
 
-    func setMoving(_ strokes: [SampledStroke], page: UIView?) {
+    func setMoving(_ strokes: [SampledStroke], page: PageView?) {
+        if movingPage !== page { movingPage?.setTransientGlass([]) }
         moving = strokes
         movingPage = page
         movingOffset = .zero
+        movingGlass = strokes.compactMap { GlassMark(stroke: $0) }
+        page?.setTransientGlass(movingGlass)
         refresh()
     }
 
     func setMovingOffset(_ offset: CGVector) {
         movingOffset = offset
+        movingPage?.setTransientGlass(movingGlass.map { original in
+            var mark = original
+            mark.frame = mark.frame.offsetBy(dx: offset.dx, dy: offset.dy)
+            return mark
+        })
         refresh()
     }
 
@@ -91,12 +105,15 @@ final class WetInkView: UIView {
     func settleMoving(keys: [StrokeKey], ink: PageInk) {
         if let page = movingPage {
             let now = CACurrentMediaTime()
+            page.setTransientGlass([])
             for (stroke, key) in zip(moving, keys) {
+                if stroke.glassStrength != nil { ink.clearPending(key); continue }
                 settling.append(Settling(stroke: stroke, page: page, ink: ink, key: key, start: now, offset: movingOffset))
             }
             startTicking()
         }
         moving = []
+        movingGlass = []
         movingPage = nil
         movingOffset = .zero
         refresh()
@@ -117,6 +134,13 @@ final class WetInkView: UIView {
     func setEraser(center: CGPoint?, radius: CGFloat, page: UIView?) {
         eraser = center.map { ($0, radius) }
         eraserPage = page
+        refresh()
+    }
+
+    func discardErasedSettling(on page: PageView) {
+        guard settling.contains(where: { $0.page === page }) else { return }
+        let pending = page.ink.renderSnapshot().pending
+        settling.removeAll { $0.page === page && !pending.contains($0.key) }
         refresh()
     }
 
@@ -164,13 +188,13 @@ final class WetInkView: UIView {
         if let page = movingPage, !moving.isEmpty {
             ctx.saveGState()
             ctx.concatenate(transform(from: page))
-            for stroke in moving {
+            for stroke in moving where stroke.glassStrength == nil {
                 InkRenderer.draw(stroke, in: ctx, smooth: true, offset: movingOffset)
             }
             ctx.restoreGState()
         }
 
-        if let active, let page = activePage {
+        if let active, active.glassStrength == nil, let page = activePage {
             ctx.saveGState()
             ctx.concatenate(transform(from: page))
             InkRenderer.draw(active, in: ctx, smooth: true)

@@ -128,7 +128,6 @@ final class ElementView: UIView {
 
         glyphGlass?.removeFromSuperview()
         glyphGlass = nil
-        // 유리 글자는 페이지의 굴절 층(GlassRefraction)이 그림
 
         guard size.width >= 1, size.height >= 1 else { return }
         let view = TiledView(frame: CGRect(origin: .zero, size: size),
@@ -136,6 +135,16 @@ final class ElementView: UIView {
         view.isHidden = textView != nil
         addSubview(view)
         tiles = view
+        if element.glassText, element.hasText {
+            let inner = bounds.insetBy(dx: element.padding.width, dy: element.padding.height)
+            let outline = GlyphOutline.path(text: element.text, attributes: ElementRenderer.attributes(element), in: inner)
+            if let mark = GlassMark(outline: outline, tint: element.textColor.uiColor, strength: element.glassTextStrength) {
+                let host = GlassShapeHost(marks: [mark])
+                host.isHidden = textView != nil
+                addSubview(host)
+                glyphGlass = host
+            }
+        }
     }
 
     // MARK: 글자 고치기

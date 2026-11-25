@@ -353,7 +353,6 @@ final class ElementController: NSObject, UITextViewDelegate {
         // 도구 막대가 이 상자의 글꼴·색·유리 설정을 보여 줌
         tools?.adopt(element)
         let textView = view.beginEditing(delegate: self, renderScale: renderScale)
-        pageView.scheduleGlass()
         updateSelectionFrame()
         textView.becomeFirstResponder()
         host.elementReveal(element.frame, in: pageView)

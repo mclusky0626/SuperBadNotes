@@ -3,9 +3,8 @@
 //  BadNotes
 //
 //  Liquid Glass 잉크: 유리펜 획과 유리 글자.
-//  모양(윤곽)을 받아서 유리처럼 그림 — 비치는 몸통 + 위쪽 안 테두리 빛 + 아래쪽 안 그늘 + 바깥 빛 테두리 + 그림자.
-//  전부 벡터라 확대해도 선명하고, 같은 코드로 PDF에도 넣음 (PDF는 그라데이션·그림자 대신 면과 선으로).
-//  화면에서는 이 밑에 진짜 Liquid Glass(UIGlassEffect)를 같은 모양으로 오려 깔아서 종이가 굴절돼 보임.
+//  편집기는 획과 글자의 윤곽에 SwiftUI의 glassEffect를 적용한다.
+//  내보내기와 페이지 넘김 스냅샷은 같은 윤곽을 벡터로 그린다.
 //
 //  유리펜 획 표시: PKStroke.randomSeed 위 16비트를 0x6A55로, 다음 8비트에 진하기를 넣음.
 //  (볼펜 잉크는 씨앗값을 그리는 데 안 써서 모양에는 영향이 없고, PKDrawing에 그대로 저장됨)
@@ -33,7 +32,12 @@ nonisolated enum GlassInk {
 
     /// 획 가운데선 → 일정한 굵기의 둥근 윤곽 (겹친 곳은 합쳐서 테두리가 깨끗하게)
     static func outline(centerline: CGPath, width: CGFloat) -> CGPath {
-        centerline.copy(strokingWithWidth: max(0.5, width), lineCap: .round, lineJoin: .round, miterLimit: 4).normalized()
+        let diameter = max(0.5, width)
+        let box = centerline.boundingBoxOfPath
+        if !box.isNull, box.size == .zero {
+            return CGPath(ellipseIn: box.insetBy(dx: -diameter / 2, dy: -diameter / 2), transform: nil)
+        }
+        return centerline.copy(strokingWithWidth: diameter, lineCap: .round, lineJoin: .round, miterLimit: 4).normalized()
     }
 
     /// 윤곽을 유리처럼 그림. thickness = 획 굵기 (글자면 글자 크기의 1/8쯤): 빛·그늘 테두리 두께 기준

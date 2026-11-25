@@ -886,7 +886,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             clearSelection()
             eraseChanged = false
             action = .erasing(pageView, before: pageView.ink.currentDrawing(), last: location)
-            erase(on: pageView, from: location, to: location)
+            erase(on: pageView, from: location, through: [])
             wetView.setEraser(center: location, radius: tools.eraserRadius, page: pageView)
 
         case .lasso:
@@ -918,13 +918,12 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             let predicted = samples(touch, event, in: pageView, predicted: true)
             wetView.setActive(builder?.makeStroke(predicted: predicted), page: pageView)
 
-        case .erasing(let pageView, let before, var last):
-            for sample in samples(touch, event, in: pageView) {
-                erase(on: pageView, from: last, to: sample.location)
-                last = sample.location
-            }
-            action = .erasing(pageView, before: before, last: last)
-            wetView.setEraser(center: last, radius: tools.eraserRadius, page: pageView)
+        case .erasing(let pageView, let before, let last):
+            let points = samples(touch, event, in: pageView).map(\.location)
+            guard let end = points.last else { return }
+            erase(on: pageView, from: last, through: points)
+            action = .erasing(pageView, before: before, last: end)
+            wetView.setEraser(center: end, radius: tools.eraserRadius, page: pageView)
 
         case .lassoing(let pageView):
             lassoPoints.append(contentsOf: samples(touch, event, in: pageView).map(\.location))
@@ -964,9 +963,17 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             commit(after, previous: before, page: pageView.index, name: "필기")
             wetView.settle(stroke, page: pageView, ink: pageView.ink)
 
-        case .erasing(let pageView, let before, _):
+        case .erasing(let pageView, let before, let last):
+            if !cancelled {
+                let points = samples(touch, event, in: pageView).map(\.location)
+                if points.contains(where: { $0 != last }) { erase(on: pageView, from: last, through: points) }
+            }
             wetView.setEraser(center: nil, radius: 0, page: nil)
             guard eraseChanged else { return }
+            if cancelled {
+                pageView.invalidateInk(pageView.ink.replace(with: before))
+                return
+            }
             let after = pageView.ink.currentDrawing()
             document.update(after, page: pageView.index)
             registerUndo(previous: before, current: after, page: pageView.index, name: "지우기")
@@ -1012,41 +1019,12 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     // MARK: 지우개
 
-    private func erase(on pageView: PageView, from a: CGPoint, to b: CGPoint) {
-        let radius = tools.eraserRadius
-        let mode = tools.eraserMode
-        var drawing = pageView.ink.currentDrawing()
-        let sampled = pageView.ink.sampledStrokes()
-        guard sampled.count == drawing.strokes.count else { return }
-
-        let onlyHighlighter = tools.eraserHighlighterOnly
-        var changed = false
-        var kept: [PKStroke] = []
-        kept.reserveCapacity(drawing.strokes.count)
-        for (stroke, s) in zip(drawing.strokes, sampled) {
-            if onlyHighlighter && !StrokeEditing.isHighlighter(stroke) {
-                kept.append(stroke)
-                continue
-            }
-            switch mode {
-            case .stroke:
-                if StrokeEditing.touches(s, from: a, to: b, radius: radius) {
-                    changed = true
-                } else {
-                    kept.append(stroke)
-                }
-            case .partial:
-                if let pieces = StrokeEditing.erase(stroke, sampled: s, from: a, to: b, radius: radius) {
-                    changed = true
-                    kept.append(contentsOf: pieces)
-                } else {
-                    kept.append(stroke)
-                }
-            }
-        }
-        guard changed else { return }
-        drawing.strokes = kept
-        pageView.invalidateInk(pageView.ink.replace(with: drawing))
+    private func erase(on pageView: PageView, from start: CGPoint, through points: [CGPoint]) {
+        let sweep = StrokeEditing.Sweep(from: start, through: points, radius: tools.eraserRadius)
+        let dirty = pageView.ink.erase(sweep, partial: tools.eraserMode == .partial, highlightersOnly: tools.eraserHighlighterOnly)
+        guard !dirty.isNull else { return }
+        wetView.discardErasedSettling(on: pageView)
+        pageView.invalidateInk(dirty)
         eraseChanged = true
     }
 
@@ -1236,7 +1214,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             if touch.type == .pencil { return tools.tool.places }
             // 손가락 필기를 켰으면 손가락도 필기 → 텍스트·올가미 도구에서만, 또는 고른 요소를 다시 누를 때
             if AppSettings.shared.fingerDrawing {
-                return tools.tool.places || tools.tool == .lasso || elementAt(touch)?.id == elements.selected?.id
+                return tools.tool.places || tools.tool == .lasso || (elements.selected != nil && elementAt(touch)?.id == elements.selected?.id)
             }
             return true
         }
@@ -1498,7 +1476,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             tools.eraserMode = .partial
             let before = page.ink.currentDrawing()
             eraseChanged = false
-            erase(on: page, from: CGPoint(x: w * 0.66, y: h * 0.6), to: CGPoint(x: w * 0.66, y: h * 0.82))
+            erase(on: page, from: CGPoint(x: w * 0.66, y: h * 0.6), through: [CGPoint(x: w * 0.66, y: h * 0.82)])
             if eraseChanged {
                 let after = page.ink.currentDrawing()
                 document.update(after, page: page.index)

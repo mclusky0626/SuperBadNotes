@@ -62,11 +62,8 @@
 - 사진은 긴 변 2400px 안으로 줄여서 JPEG(투명하면 PNG)로 넣음. 같은 사진은 한 번만 들어감 (내용 해시)
 
 ## Liquid Glass 펜 · 유리 글자 (`Storage/GlassInk.swift`)
-- 화면: 굴절을 직접 계산 (`Editor/Direct/GlassRefraction.swift`). Apple 유리(glassEffect)는 모양 전체를 렌즈 하나로 봐서
-  손글씨처럼 길고 꼬인 모양에서 뒤 그림이 소용돌이치듯 왜곡돼서 바꿈
-  - 획·글자마다 둥근 유리 막대: 가장자리까지 거리로 원 단면 높이 → 법선 → 스넬 법칙(굴절률 1.5)으로 두께만큼 꺾인 자리의 바탕
-  - 바탕(PDF + 상자·사진 + 유리 아닌 필기)을 직접 그려서 픽셀 계산, 색·진하기 + 반사광 + 가장자리 빛 + 그늘 + 그림자
-  - 페이지마다 한 장, 바뀔 때마다 백그라운드에서 다시 (페이지 pt의 1.5~4배 해상도)
+- 화면에서는 펜 획과 글리프의 윤곽에 SwiftUI의 `glassEffect(_:in:)`를 적용한다. 같은 페이지의 유리펜 획은 `GlassEffectContainer`에서 함께 그린다. [Apple 공식 문서](https://developer.apple.com/documentation/swiftui/applying-liquid-glass-to-custom-views)
+- 부분 지우개는 한 번에 들어온 입력 점들을 연결해 획의 마스크를 갱신한다. 획의 원래 윤곽과 필압을 보존하고 지운 자리에 종이와 사진이 드러난다. [iPad 시뮬레이터에서 지우기 전과 다시 열었을 때 비교](docs/screenshots/liquid-glass-eraser.png)
 - PDF 파일(다른 앱용 모양)에는 진짜 유리를 넣을 수 없어서 비슷한 그림으로 구움: 비치는 색 몸통 + 반사광 + 그늘 + 빛 테두리
 - 이게 싫으면 **.badnote** 형식으로 만들면 흉내를 안 구움 (아래 파일 형식)
 - 색 = 고른 펜 색 / 글자 색, 진하기 0~100% (0이면 거의 투명한 유리). 막대의 % 칩을 누르면 미리보기 + 슬라이더
