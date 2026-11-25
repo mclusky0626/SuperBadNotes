@@ -90,6 +90,7 @@ nonisolated struct SampledStroke: @unchecked Sendable {
     /// 그림 좌표(페이지 캔버스)에서 차지하는 영역
     let bounds: CGRect
 
+    var imprint: BrushImprint? = nil
     /// 유리펜 획이면 진하기 (0~1), 아니면 nil
     var glassStrength: CGFloat? = nil
     /// Apple 필기 도구로 그은 획(또는 표시 없는 예전 획): 화면에서는 Apple 렌더러로 그림
@@ -134,7 +135,10 @@ nonisolated enum InkRenderer {
         let nominal = max(0.3, stroke.path.first.map { renderWidth($0, inkType, direction: 0) } ?? 1)
         let step = min(1.0, max(0.3, nominal * 0.3))
 
-        let raw = Array(stroke.path.interpolatedPoints(by: .distance(step)))
+        let profile = BrushProfile(seed: stroke.randomSeed)
+        var raw = Array(stroke.path.interpolatedPoints(by: .distance(step)))
+        if raw.isEmpty, let dot = stroke.path.first { raw.append(dot) }
+        let imprint = BrushImprint(profile: profile, points: raw, seed: stroke.randomSeed)
         var points: [SampledStroke.Point] = []
         points.reserveCapacity(raw.count)
         var opacitySum: CGFloat = 0
@@ -152,7 +156,10 @@ nonisolated enum InkRenderer {
         let color = resolvedColor(stroke.ink.color)
         let look = look(for: inkType, colorAlpha: color.alpha)
         let count = CGFloat(max(1, points.count))
-        let alpha = min(1, max(0, color.alpha * (points.isEmpty ? 1 : opacitySum / count) * look.alpha))
+        // 흑연은 스탬프를 찍을 때 점마다 필압에 따른 농도를 적용한다.
+        let alpha = imprint == nil
+            ? min(1, max(0, color.alpha * (points.isEmpty ? 1 : opacitySum / count) * look.alpha))
+            : color.alpha
 
         var maskPath: CGPath?
         var maskSpace = SampledStroke.MaskSpace.none
@@ -169,6 +176,8 @@ nonisolated enum InkRenderer {
             }
         }
 
+        var bounds = stroke.renderBounds
+        if let imprint { bounds = bounds.union(imprint.bounds.applying(stroke.transform)) }
         return SampledStroke(
             key: key ?? StrokeKey(stroke),
             points: points,
@@ -180,8 +189,9 @@ nonisolated enum InkRenderer {
             blend: look.blend,
             meanWidth: points.isEmpty ? nominal : widthSum / count,
             // 유리펜은 그림자·빛 테두리만큼 조금 넓게
-            bounds: stroke.renderBounds.insetBy(dx: -1 - (GlassInk.isGlass(stroke) ? nominal * 0.6 : 0),
+            bounds: bounds.insetBy(dx: -1 - (GlassInk.isGlass(stroke) ? nominal * 0.6 : 0),
                                                 dy: -1 - (GlassInk.isGlass(stroke) ? nominal * 0.8 : 0)),
+            imprint: imprint,
             glassStrength: GlassInk.isGlass(stroke) ? GlassInk.strength(stroke.randomSeed) : nil,
             appleSource: InkOrigin.isBadNotes(stroke.randomSeed) ? nil : stroke
         )
@@ -228,7 +238,9 @@ nonisolated enum InkRenderer {
             return
         }
 
-        if alpha < 0.999 || s.blend != .normal {
+        if let imprint = s.imprint {
+            imprint.draw(alpha: alpha, in: context)
+        } else if alpha < 0.999 || s.blend != .normal {
             context.setAlpha(alpha)
             context.setBlendMode(s.blend)
             strokeSinglePath(s.points, width: s.meanWidth, smooth: smooth, in: context)

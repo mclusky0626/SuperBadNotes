@@ -76,7 +76,8 @@ struct SettingsView: View {
                 }
 
                 Section("정보") {
-                    LabeledContent("버전", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "-")
+                    LabeledContent("버전", value: AppRelease.installedVersion ?? "–")
+                    NavigationLink("변경 기록") { ReleaseNotesView() }
                     LabeledContent("PDF 위치", value: "파일 › 나의 iPad › BadNotes")
                     Button("로그 보기", action: openLog)
                 }

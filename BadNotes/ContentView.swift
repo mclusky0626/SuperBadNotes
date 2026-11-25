@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var showTheme = false
     @State private var showSettings = false
     @State private var showLog = false
+    @State private var newRelease: AppRelease?
     var log = AppLog.shared
 
     var body: some View {
@@ -59,6 +60,16 @@ struct ContentView: View {
                          openLog: { switchFromSettings { showLog = true } })
         }
         .sheet(isPresented: $showLog) { LogView() }
+        .sheet(item: $newRelease) { release in
+            NavigationStack {
+                ReleaseNotesView(release: release)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("확인") { newRelease = nil }
+                        }
+                    }
+            }
+        }
         .task { await startup() }
     }
 
@@ -231,8 +242,11 @@ struct ContentView: View {
         }
         if args.contains("-BNOpenLast"), let url = LastOpened.url, FileManager.default.fileExists(atPath: url.path) {
             await openNote(url)
+            return
         }
+        if showSettings || showTheme || args.contains("-BNShowNewNotebook") { return }
         #endif
+        newRelease = AppRelease.takeUnseenRelease()
     }
 }
 

@@ -24,9 +24,9 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     /// 캔버스 맨 아래에 까는 페이지들 (원래 크기로 배치하고 확대 배율만큼 키움)
     private let pagesView = UIView()
     private var pageViews: [PageView] = []
-    private var pageOrigins: [CGPoint] = []
+    private var placements: [PagePlacement] = []
     private var natural: CGSize = .zero
-    private var laidOutWidth: CGFloat = 0
+    private var laidOutSize: CGSize = .zero
     private var didInitialScroll = false
     private var applyingDrawing = false
     /// 페이지마다 마지막으로 넘긴 필기의 지문 (바뀐 페이지만 저장)
@@ -45,7 +45,12 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
 
     var initialPage = 0
     var chromeInsets: UIEdgeInsets = .zero {
-        didSet { if chromeInsets != oldValue { updateInsets() } }
+        didSet {
+            guard chromeInsets != oldValue else { return }
+            let atTop = abs(canvas.contentOffset.y + canvas.contentInset.top) < 1
+            updateInsets()
+            if atTop { canvas.contentOffset.y = -canvas.contentInset.top }
+        }
     }
 
     init(document: NoteDocument, bridge: EditorBridge) {
@@ -158,7 +163,7 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     func setTwoUp(_ on: Bool) {
         guard on != twoUp else { return }
         twoUp = on
-        guard laidOutWidth > 0 else { return }
+        guard laidOutSize.width > 0 else { return }
         let keep = bridge.page
         layoutPages(resetZoom: true)
         scroll(toPage: keep, animated: false)
@@ -189,9 +194,9 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     override func layoutSubviews() {
         super.layoutSubviews()
         canvas.frame = bounds
-        guard bounds.width > 0, abs(bounds.width - laidOutWidth) > 0.5 else { return }
+        guard bounds.width > 0, bounds.height > 0, bounds.size != laidOutSize else { return }
         let keep = bridge.page
-        laidOutWidth = bounds.width
+        laidOutSize = bounds.size
         layoutPages(resetZoom: true)
         if didInitialScroll {
             scroll(toPage: keep, animated: false)
@@ -202,7 +207,7 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
             if document.isBoard, let board = pageViews.first {
                 let target = document.contentBounds(page: 0)
                     ?? CGRect(x: board.bounds.midX - 400, y: board.bounds.midY - 300, width: 800, height: 600)
-                let zoom = canvas.zoomScale, origin = pageOrigins.first ?? .zero
+                let zoom = canvas.zoomScale, origin = placements.first?.frame.origin ?? .zero
                 canvas.contentOffset = CGPoint(x: (origin.x + target.midX) * zoom - canvas.bounds.width / 2,
                                                y: (origin.y + target.midY) * zoom - canvas.bounds.height / 2)
             } else if initialPage > 0 {
@@ -213,35 +218,14 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
 
     /// 페이지를 원래 크기(pt)로 세로로 쌓음. 페이지 자리가 바뀌면 필기도 다시 합쳐서 넣음
     private func layoutPages(resetZoom: Bool) {
-        let maxWidth = pageViews.map(\.bounds.width).max() ?? 1
-        let gap = max(12, maxWidth * 0.025)
-        let spine: CGFloat = 2
-        // 가로 화면이면 두 쪽씩 양옆으로 (표지는 혼자)
-        let spread = twoUp && bounds.width > bounds.height
+        let spread = !document.isBoard && twoUp && bounds.width > bounds.height
         let rows = PageRows.make(count: pageViews.count, twoUp: spread, coverAlone: document.hasCover)
-        func width(_ row: [Int]) -> CGFloat {
-            row.reduce(0) { $0 + pageViews[$1].bounds.width } + spine * CGFloat(max(0, row.count - 1))
-        }
-        let contentWidth = spread ? maxWidth * 2 + spine : rows.map(width).max() ?? maxWidth
-        var y = gap
-        var origins = Array(repeating: CGPoint.zero, count: pageViews.count)
-        for row in rows {
-            var x = gap + (contentWidth - width(row)) / 2
-            let h = row.map { pageViews[$0].bounds.height }.max() ?? 0
-            // 두 쪽: 책등을 가운데 두고 제자리에 (표지는 오른쪽, 홀수로 남은 마지막 쪽은 왼쪽)
-            let rightSlots = PageRows.rightSlots(row, coverAlone: document.hasCover)
-            for (index, right) in zip(row, rightSlots) {
-                let view = pageViews[index]
-                if spread { x = right ? gap + maxWidth + spine : gap + maxWidth - view.bounds.width }
-                origins[index] = CGPoint(x: x, y: y + (h - view.bounds.height) / 2)
-                view.frame.origin = origins[index]
-                x += view.bounds.width + spine
-            }
-            y += h + gap
-        }
-        let moved = !pageOrigins.isEmpty && Array(origins.prefix(pageOrigins.count)) != pageOrigins
-        pageOrigins = origins
-        natural = CGSize(width: contentWidth + gap * 2, height: y)
+        let arrangement = PageArrangement(sizes: pageViews.map(\.bounds.size), rows: rows, twoUp: spread,
+                                          coverAlone: document.hasCover)
+        let moved = !placements.isEmpty && !arrangement.placements.starts(with: placements)
+        placements = arrangement.placements
+        for placement in placements { placement.apply(to: pageViews[placement.index]) }
+        natural = arrangement.size
         pagesView.bounds = CGRect(origin: .zero, size: natural)
 
         if document.isBoard {
@@ -250,11 +234,12 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
             canvas.maximumZoomScale = 6
             if resetZoom && !didInitialScroll { canvas.zoomScale = 1 }
         } else {
+            let ratio = zoomLocked && didInitialScroll ? canvas.zoomScale / fitScale : 1
             let fit = bounds.width / natural.width
             fitScale = fit
             canvas.minimumZoomScale = fit * 0.5
             canvas.maximumZoomScale = fit * 8
-            if resetZoom { canvas.zoomScale = fit }
+            if resetZoom { canvas.zoomScale = fit * ratio }
         }
         syncUnderlay()
         if moved { loadDrawing() }
@@ -272,19 +257,25 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
         updateInsets()
     }
 
+    func toolPickerFramesObscuredDidChange(_ toolPicker: PKToolPicker) {
+        updateInsets()
+    }
+
     private func updateInsets() {
         let side = max(0, (canvas.bounds.width - canvas.contentSize.width) / 2)
-        let bottom = max(chromeInsets.bottom + 80, keyboardOverlap + 16)
+        let palette = toolPicker.isVisible ? toolPicker.frameObscured(in: self).intersection(bounds) : .null
+        let docked = !palette.isNull && palette.maxY >= bounds.maxY - 1
+        let bottom = max(chromeInsets.bottom, docked ? palette.height : 0, keyboardOverlap > 0 ? keyboardOverlap + 16 : 0)
         canvas.contentInset = UIEdgeInsets(top: chromeInsets.top, left: side, bottom: bottom, right: side)
         canvas.verticalScrollIndicatorInsets = UIEdgeInsets(top: chromeInsets.top, left: 0, bottom: bottom, right: 0)
     }
 
     func scroll(toPage index: Int, animated: Bool) {
-        guard pageOrigins.indices.contains(index) else { return }
+        guard placements.indices.contains(index) else { return }
         let zoom = canvas.zoomScale
         let top = -canvas.contentInset.top
         let bottom = max(top, canvas.contentSize.height - canvas.bounds.height + canvas.contentInset.bottom)
-        let y = min(max(pageOrigins[index].y * zoom - canvas.contentInset.top - 12, top), bottom)
+        let y = min(max(placements[index].frame.minY * zoom - canvas.contentInset.top, top), bottom)
         canvas.setContentOffset(CGPoint(x: canvas.contentOffset.x, y: y), animated: animated)
     }
 
@@ -309,11 +300,12 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     private func loadDrawing() {
         var merged = PKDrawing()
         signatures = [:]
-        for (index, origin) in pageOrigins.enumerated() {
+        for placement in placements {
+            let index = placement.index
             let drawing = document.drawing(for: index)
             signatures[index] = Self.signature(drawing.strokes)
             guard !drawing.strokes.isEmpty else { continue }
-            merged.append(drawing.transformed(using: CGAffineTransform(translationX: origin.x, y: origin.y)))
+            merged.append(drawing.transformed(using: placement.transform))
         }
         applyingDrawing = true
         canvas.drawing = merged
@@ -321,16 +313,15 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     }
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-        guard !applyingDrawing, !pageOrigins.isEmpty else { return }
+        guard !applyingDrawing, !placements.isEmpty else { return }
         var perPage: [Int: [PKStroke]] = [:]
         for stroke in canvasView.drawing.strokes {
             let index = page(for: stroke)
             var local = stroke
-            let origin = pageOrigins[index]
-            local.transform = stroke.transform.concatenating(CGAffineTransform(translationX: -origin.x, y: -origin.y))
+            local.transform = stroke.transform.concatenating(placements[index].transform.inverted())
             perPage[index, default: []].append(local)
         }
-        for index in pageOrigins.indices {
+        for index in placements.indices {
             let strokes = perPage[index] ?? []
             let signature = Self.signature(strokes)
             guard signature != (signatures[index] ?? []) else { continue }
@@ -346,12 +337,15 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
         var best = 0
         var bestDistance = CGFloat.greatestFiniteMagnitude
-        for (index, view) in pageViews.enumerated() {
-            let frame = CGRect(origin: pageOrigins[index], size: view.bounds.size)
+        for placement in placements {
+            let index = placement.index
+            let frame = placement.frame
             if frame.contains(center) { return index }
             let dy = center.y < frame.minY ? frame.minY - center.y : max(0, center.y - frame.maxY)
-            if dy < bestDistance {
-                bestDistance = dy
+            let dx = max(frame.minX - center.x, center.x - frame.maxX, 0)
+            let distance = dx * dx + dy * dy
+            if distance < bestDistance {
+                bestDistance = distance
                 best = index
             }
         }
@@ -407,13 +401,13 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     private func updateCurrentPage() {
         let centerY = (canvas.contentOffset.y + canvas.bounds.height / 2) / max(canvas.zoomScale, 0.001)
         var current = 0
-        for (index, origin) in pageOrigins.enumerated() {
-            if origin.y <= centerY { current = index } else { break }
+        for placement in placements {
+            if placement.frame.minY <= centerY { current = placement.index } else { break }
         }
         if bridge.page != current { bridge.page = current }
         if bridge.isBook { bridge.isBook = false }
-        if let last = pageViews.last, let origin = pageOrigins.last {
-            let maxY = (origin.y + last.bounds.height) * canvas.zoomScale
+        if !placements.isEmpty {
+            let maxY = natural.height * canvas.zoomScale
             let atEnd = maxY <= canvas.contentOffset.y + canvas.bounds.height + 40
             if bridge.atLastPage != atEnd { bridge.atLastPage = atEnd }
         }
@@ -465,10 +459,9 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
 
     private func pageHit(_ point: CGPoint) -> (PageView, CGPoint)? {
         let inPages = canvas.convert(point, to: pagesView)
-        for view in pageViews where view.frame.insetBy(dx: -24, dy: -12).contains(inPages) {
-            return (view, pagesView.convert(inPages, to: view))
-        }
-        return nil
+        let hit = pageViews.first { $0.frame.contains(inPages) }
+            ?? pageViews.first { $0.frame.insetBy(dx: -24, dy: -12).contains(inPages) }
+        return hit.map { ($0, pagesView.convert(inPages, to: $0)) }
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -609,7 +602,9 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
 
     var elementDocument: NoteDocument { document }
     var elementUndo: UndoManager { history }
-    var elementZoom: CGFloat { canvas.zoomScale }
+    func elementZoom(on page: Int) -> CGFloat {
+        canvas.zoomScale * (elementPageView(page)?.transform.a ?? 1)
+    }
 
     func elementPageView(_ index: Int) -> PageView? {
         pageViews.indices.contains(index) ? pageViews[index] : nil

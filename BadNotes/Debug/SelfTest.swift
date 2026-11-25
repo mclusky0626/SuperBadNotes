@@ -50,6 +50,7 @@ nonisolated enum SelfTest {
             try migrationTests(root: root, results)
             journalTests(root: root, results)
             inkEngineTests(results)
+            try brushTests(root: root, results)
             highlighterTests(results)
             await pencilKitMatchTests(results)
             try await documentTests(root: root, results)
@@ -59,6 +60,8 @@ nonisolated enum SelfTest {
             try coverTests(root: root, results)
             await maskMatchesPencilKit(results)
             pageCurlTests(results)
+            try await spreadTurnTests(root: root, results)
+            try await spreadLayoutTests(root: root, results)
             await glassPageImageTest(results)
         } catch {
             results.check("예외 없이 끝남", false, "\(error)")
@@ -364,6 +367,58 @@ nonisolated enum SelfTest {
         r.check("같은 획은 같은 키 (다시 계산 안 함)", StrokeKey(horizontal) == StrokeKey(horizontal))
         r.check("형광펜은 반투명으로 그림",
                 InkRenderer.sample(line(.marker, .systemYellow, .zero, CGPoint(x: 50, y: 0), width: 12)).translucent)
+    }
+
+    private static func brushTests(root: URL, _ r: Results) throws {
+        func stroke(_ profile: BrushProfile, angle: CGFloat = 0, altitude: CGFloat = .pi / 2,
+                    interval: Double = 0.01, pressure: (Int) -> CGFloat = { _ in 0.45 }) -> PKStroke {
+            let ink: PKInk.InkType = profile == .graphite ? .pencil : (profile == .fountain ? .fountainPen : .pen)
+            var builder = StrokeBuilder(inkType: ink, color: .blue, width: 12, pressureRange: 0.18...2.1,
+                                        startTime: 0, seed: profile.seed(salt: 37))
+            for i in 0...80 {
+                let distance = CGFloat(i) * 2
+                builder.add(InputSample(location: CGPoint(x: 30 + cos(angle) * distance, y: 100 + sin(angle) * distance),
+                                        time: Double(i) * interval, force: pressure(i), azimuth: 0, altitude: altitude))
+            }
+            return builder.makeStroke()!
+        }
+
+        let slow = stroke(.brush, interval: 0.03), fast = stroke(.brush, interval: 0.001)
+        func width(_ stroke: PKStroke, _ i: Int) -> CGFloat { InkRenderer.renderWidth(stroke.path[i], .pen, direction: 0) }
+        r.check("붓펜: 같은 필압에서 빠른 획은 가늘고 양끝은 뾰족함",
+                width(fast, 40) < width(slow, 40) * 0.7 && max(width(slow, 0), width(slow, 80)) < width(slow, 40) * 0.3)
+        let fountain = InkRenderer.sample(stroke(.fountain, altitude: .pi / 4))
+        let broad = InkRenderer.sample(stroke(.fountain, angle: .pi / 2, altitude: .pi / 4))
+        r.check("만년필: 납작한 펜촉의 방향에 따라 굵기가 달라짐", broad.meanWidth > fountain.meanWidth * 3)
+
+        let pencil = stroke(.graphite, altitude: .pi / 5) { $0 < 40 ? 0.05 : 0.8 }
+        let drawing = PKDrawing(strokes: [pencil])
+        let restored = try PKDrawing(data: drawing.dataRepresentation()).strokes[0]
+        let copy = StrokeEditing.duplicated(pencil, by: .zero)
+        r.check("연필: 저장·복제 후 펜촉과 흑연 씨앗을 보존", restored.randomSeed == pencil.randomSeed
+                && copy.randomSeed == pencil.randomSeed && StrokeKey(copy) != StrokeKey(pencil))
+        let image = renderStrokes([restored], size: CGSize(width: 220, height: 200))
+        func redness(_ image: CGImage?, from start: Int) -> [CGFloat] {
+            (start..<(start + 24)).map { rgb(image, at: CGPoint(x: $0, y: 100)).r }
+        }
+        let light = redness(image, from: 50), dark = redness(image, from: 144)
+        r.check("연필: 한 획 안에서 필압에 따라 농도가 변하고 흑연 결이 보임",
+                dark.reduce(0, +) + 4 < light.reduce(0, +) && dark.max()! - dark.min()! > 0.04,
+                "밝은 부분 \(light.reduce(0, +) / 24), 진한 부분 \(dark.reduce(0, +) / 24)")
+        let upright = InkRenderer.sample(stroke(.graphite))
+        r.check("연필: 눕히면 넓게 칠해짐", InkRenderer.sample(pencil).meanWidth > upright.meanWidth * 2)
+        let erased = StrokeEditing.erase(restored, sampled: InkRenderer.sample(restored),
+                                         from: CGPoint(x: 155, y: 70), to: CGPoint(x: 155, y: 130), radius: 6)
+        let cut = erased.flatMap { renderStrokes($0, size: CGSize(width: 220, height: 200)) }
+        r.check("연필: 부분 지우개가 흑연 결까지 지움", cut != nil && rgb(cut, at: CGPoint(x: 155, y: 100)).r > 0.98
+                && redness(cut, from: 165).min()! < 0.8)
+        let url = root.appendingPathComponent("Brushes.pdf")
+        try makePDF(url)
+        _ = try PDFInkWriter.apply([0: drawing], to: url)
+        let exported = PDFDocument(url: url)?.page(at: 0).flatMap(render)
+        let darkPDF = redness(exported, from: 144)
+        r.check("연필: PDF에 펜 색과 질감이 보임", exported != nil && darkPDF.max()! - darkPDF.min()! > 0.04
+                && darkPDF.min()! < 0.8 && rgb(exported, at: CGPoint(x: 150, y: 100)).b > 0.8)
     }
 
     // MARK: 형광펜
@@ -947,6 +1002,115 @@ nonisolated enum SelfTest {
 
     // MARK: 책처럼 넘기기
 
+    @MainActor
+    private static func spreadLayoutTests(root: URL, _ r: Results) async throws {
+        let url = root.appendingPathComponent("MixedSpread.pdf")
+        try makePDF(url)
+        let note = try await NoteDocument.open(url)
+        let direct = DirectEditorView(document: note, tools: .shared, bridge: EditorBridge())
+        direct.setPageView(book: true, twoUp: true)
+        let apple = PencilKitEditorView(document: note, bridge: EditorBridge())
+        apple.setTwoUp(true)
+        defer {
+            direct.prepareForRemoval()
+            apple.prepareForRemoval()
+        }
+
+        for editor: UIView & ElementHost in [direct, apple] {
+            let name = editor === direct ? "직접 필기" : "Apple 도구"
+            editor.frame = CGRect(x: 0, y: 0, width: 1200, height: 780)
+            editor.layoutIfNeeded()
+            guard let left = editor.elementPageView(0), let right = editor.elementPageView(1) else {
+                r.check("\(name) 펼침면 페이지 준비", false)
+                continue
+            }
+            let a = left.convert(left.bounds, to: editor)
+            let b = right.convert(right.bounds, to: editor)
+            r.check("\(name) 서로 다른 폭의 PDF도 화면을 정확히 이분할",
+                    abs(a.minX) < 0.1 && abs(a.maxX - 600) < 0.1 && abs(b.minX - 600) < 0.1 && abs(b.maxX - 1200) < 0.1,
+                    "\(a) / \(b)")
+            r.check("\(name) 회전된 페이지의 원본 비율 유지",
+                    abs(b.height / b.width - right.bounds.height / right.bounds.width) < 0.001)
+
+            if editor === apple, let canvas = apple.subviews.compactMap({ $0 as? PKCanvasView }).first {
+                // Canvas coordinates are the paper placements before scroll-view zoom.
+                let native = PKDrawing(strokes: [line(.pen, .black, CGPoint(x: 50, y: 50),
+                                                      CGPoint(x: 150, y: 150), width: 4)])
+                let frame = right.frame
+                let scale = frame.width / right.bounds.width
+                let transform = CGAffineTransform(a: scale, b: 0, c: 0, d: scale, tx: frame.minX, ty: frame.minY)
+                canvas.drawing = native.transformed(using: transform)
+                apple.canvasViewDrawingDidChange(canvas)
+                r.check("Apple 필기 저장 좌표가 원래 PDF 페이지와 일치",
+                        note.drawing(for: 0).strokes.isEmpty && close(note.drawing(for: 1).bounds, native.bounds, 0.5))
+            }
+
+            editor.frame.size.height = 1400
+            editor.layoutIfNeeded()
+            let portrait = left.convert(left.bounds, to: editor)
+            r.check("\(name) 너비가 같아도 세로로 바뀌면 한 쪽 보기",
+                    portrait.width > 600 && (right.isHidden || right.frame.minY >= left.frame.maxY))
+        }
+    }
+
+    @MainActor
+    private static func spreadTurnTests(root: URL, _ r: Results) async throws {
+        let url = root.appendingPathComponent("Spread.pdf")
+        let format = UIGraphicsPDFRendererFormat()
+        format.documentInfo = [kCGPDFContextKeywords as String: ["\(PaperSpec.coverPrefix)navy"]]
+        let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 150, height: 200), format: format)
+        try renderer.writePDF(to: url) { context in
+            for height in [260, 160, 200, 130] {
+                context.beginPage(withBounds: CGRect(x: 0, y: 0, width: 150, height: height), pageInfo: [:])
+            }
+        }
+        let note = try await NoteDocument.open(url)
+        let bridge = EditorBridge()
+        let editor = DirectEditorView(document: note, tools: .shared, bridge: bridge)
+        editor.setPageView(book: true, twoUp: true)
+        editor.frame = CGRect(x: 0, y: 0, width: 640, height: 400)
+        editor.layoutIfNeeded()
+        defer { editor.prepareForRemoval() }
+
+        func visiblePages() -> [Int] {
+            (0..<4).compactMap(editor.elementPageView).filter { !$0.isHidden }.map(\.index)
+        }
+        guard let scroll = editor.subviews.compactMap({ $0 as? UIScrollView }).first else {
+            throw TestError(description: "책 보기 스크롤 화면 없음")
+        }
+        scroll.contentOffset.y = 90
+        bridge.turn(1)
+        r.check("표지를 열 때 종이 밑의 오른쪽 페이지만 먼저 보임", visiblePages() == [2])
+        if let curl = editor.subviews.compactMap({ $0 as? PageCurlView }).first, let page = editor.elementPageView(1) {
+            let destination = page.convert(page.bounds, to: editor)
+            r.check("스크롤한 표지의 뒷면이 높이가 다른 다음 장의 실제 위치에 내려앉음",
+                    curl.landingRect == destination && curl.geometry.rect.minY < destination.minY
+                        && curl.geometry.rect.height > destination.height)
+        } else {
+            r.check("스크롤한 표지 넘기기 준비", false)
+        }
+        editor.endFlip(complete: false)
+        r.check("표지를 열다 놓으면 표지와 읽던 위치 복원",
+                visiblePages() == [0] && bridge.page == 0 && abs(scroll.contentOffset.y - 90) < 0.01)
+        bridge.turn(1)
+        editor.endFlip(complete: true)
+        r.check("표지가 내려앉으면 첫 펼침면 두 쪽이 보임", visiblePages() == [1, 2])
+
+        bridge.turn(1)
+        r.check("마지막 한 쪽도 펼쳐지는 종이 뒷면으로만 보임", visiblePages().isEmpty)
+        editor.endFlip(complete: true)
+        bridge.turn(-1)
+        r.check("마지막 장에서 돌아갈 때 왼쪽 페이지만 먼저 보임", visiblePages() == [1])
+        editor.endFlip(complete: true)
+        bridge.turn(-1)
+        r.check("표지를 덮는 동안 고정된 표지가 먼저 나타나지 않음", visiblePages().isEmpty)
+        editor.endFlip(complete: false)
+        r.check("표지를 덮다 놓으면 원래 펼침면 복원", visiblePages() == [1, 2])
+        bridge.turn(-1)
+        editor.endFlip(complete: true)
+        r.check("표지를 다 덮으면 오른쪽 표지만 보임", visiblePages() == [0])
+    }
+
     private static func pageCurlTests(_ r: Results) {
         // 두 쪽 배치: 표지는 오른쪽, 홀수로 남은 마지막 쪽은 왼쪽 자리
         let withCover = PageRows.make(count: 4, twoUp: true, coverAlone: true)   // [0] [1,2] [3]
@@ -1075,9 +1239,11 @@ nonisolated enum SelfTest {
 
         var worst = (black: 0, total: 0, case: "")
         var frames = 0
+        var alignedLandings = 0
         for spineOnLeft in [true, false] {
             let rect = spineOnLeft ? CGRect(x: 322, y: 30, width: 260, height: 360) : CGRect(x: 58, y: 30, width: 260, height: 360)
             let g = CurlGeometry(rect: rect, spineOnLeft: spineOnLeft)
+            let landing = CGRect(x: 2 * g.spineX - rect.maxX, y: 78, width: rect.width, height: 250)
             let toward: CGFloat = spineOnLeft ? -1 : 1
             for grab in [rect.minY + 2, rect.maxY - 2] {
                 // 아주 조금 끈 것부터 거의 다 넘긴 것까지, 위아래로도 흔들어서
@@ -1098,7 +1264,9 @@ nonisolated enum SelfTest {
                             guard let buffer = res.queue.makeCommandBuffer(),
                                   let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { continue }
                             res.encode(CurlResources.Frame(viewSize: size, leafRect: rect, underRect: rect, state: st,
-                                                           pageWidth: rect.width, front: front, back: withBack ? back : nil),
+                                                           pageWidth: rect.width, front: front, back: withBack ? back : nil,
+                                                           landingTransform: g.landingTransform(to: withBack ? landing : nil,
+                                                                                               progress: st.turned)),
                                        into: encoder)
                             encoder.endEncoding()
                             buffer.commit()
@@ -1107,6 +1275,13 @@ nonisolated enum SelfTest {
                             var pixels = [UInt8](repeating: 0, count: Int(size.width * size.height) * 4)
                             color.getBytes(&pixels, bytesPerRow: Int(size.width) * 4,
                                            from: MTLRegionMake2D(0, 0, Int(size.width), Int(size.height)), mipmapLevel: 0)
+                            if withBack, st.turned == 1, dy == 0 {
+                                func alpha(_ y: CGFloat) -> UInt8 {
+                                    pixels[(Int(y) * Int(size.width) + Int(landing.midX)) * 4 + 3]
+                                }
+                                if alpha(landing.minY + 1) > 240, alpha(landing.maxY - 1) > 240,
+                                   alpha(landing.minY - 2) < 20, alpha(landing.maxY + 2) < 20 { alignedLandings += 1 }
+                            }
                             var black = 0, opaque = 0
                             pixels.withUnsafeBufferPointer { p in
                                 var i = 0
@@ -1129,6 +1304,7 @@ nonisolated enum SelfTest {
         }
         r.check("넘기는 종이에 검은 점 없음 (\(frames)장)", worst.black == 0,
                 "검은 점 \(worst.black)/\(worst.total): \(worst.case)")
+        r.check("양방향 말림 마지막 프레임의 위아래 픽셀이 다음 페이지와 일치", alignedLandings == 4)
     }
 
     private static func coverTests(root: URL, _ r: Results) throws {

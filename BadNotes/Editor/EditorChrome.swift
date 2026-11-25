@@ -34,35 +34,34 @@ struct EditorChrome: View {
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            topBar
-            HStack(alignment: .top, spacing: 10) {
+        ViewThatFits(in: .horizontal) {
+            // 넓은 창에서는 도구·실행 취소·옵션이 한 줄을 함께 쓴다.
+            HStack(spacing: 6) {
+                topBar
                 undoPill
-                if showsOptions {
-                    // 넉넉하면 화면 가운데, 모자라면 옆으로 밀어서 봄
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 0) {
-                            Spacer(minLength: 0)
+                if showsOptions { optionsBar.fixedSize(horizontal: true, vertical: false) }
+            }
+            VStack(spacing: 3) {
+                ViewThatFits(in: .horizontal) {
+                    topBar
+                    ScrollView(.horizontal, showsIndicators: false) { topBar.fixedSize() }
+                }
+                HStack(spacing: 6) {
+                    undoPill
+                    if showsOptions {
+                        ViewThatFits(in: .horizontal) {
                             optionsBar
-                            Spacer(minLength: 0)
-                            undoPill.hidden()
+                            ScrollView(.horizontal, showsIndicators: false) { optionsBar.fixedSize() }
+                                .scrollClipDisabled()
                         }
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            optionsBar.padding(.vertical, 2)
-                        }
-                        .scrollClipDisabled()
                     }
-                    .id(optionsID)
-                    .transition(.asymmetric(insertion: .scale(scale: 0.92, anchor: .top).combined(with: .opacity),
-                                            removal: .opacity))
-                } else {
                     Spacer(minLength: 0)
                 }
             }
-            .animation(spring, value: optionsID)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 4)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .animation(spring, value: optionsID)
     }
 
     private var showsOptions: Bool { mode == .direct || tools.tool.places }
@@ -108,7 +107,7 @@ struct EditorChrome: View {
             moreMenu
         }
         .padding(.horizontal, 8)
-        .frame(height: 52)
+        .frame(height: 46)
         .glassEffect(themes.glass, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
@@ -158,6 +157,7 @@ struct EditorChrome: View {
                     Toggle(isOn: $settings.twoUpLandscape) { Label("가로 화면에서 두 쪽", systemImage: "rectangle.split.2x1") }
                 }
             }
+            Button("도구 막대 숨기기", systemImage: "rectangle.compress.vertical") { bridge.chromeHidden = true }
             Button("테마", systemImage: "paintpalette", action: onTheme)
             Button("설정", systemImage: "gearshape", action: onSettings)
             Button("로그", systemImage: "ladybug", action: onLog)
@@ -226,7 +226,7 @@ struct ToolOptionsBar: View {
             }
         }
         .padding(.horizontal, 8)
-        .frame(height: 48)
+        .frame(height: 44)
         .glassEffect(themes.glass, in: .capsule)
     }
 
@@ -849,16 +849,20 @@ struct SizeEditor: View {
                 context.stroke(Path(ellipseIn: rect), with: .color(.gray), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
                 return
             }
-            var path = Path()
-            let steps = 60
-            for i in 0...steps {
-                let t = CGFloat(i) / CGFloat(steps)
+            var builder = tools.makeStrokeBuilder(startTime: 0, width: width, salt: 17)
+            for i in 0...60 {
+                let t = CGFloat(i) / 60
                 let x = 18 + (size.width - 36) * t
-                let y = size.height / 2 + (tools.inkTool == .highlighter ? 0 : sin(t * .pi * 2) * (size.height / 2 - width / 2 - 6))
-                if i == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
+                let amplitude = tools.inkTool == .highlighter ? 0 : max(0, (size.height - width * 2.8) / 2 - 5)
+                let y = size.height / 2 + sin(t * .pi * 2) * amplitude
+                builder.add(InputSample(location: CGPoint(x: x, y: y), time: Double(i) / 120,
+                                        force: 0.06 + 0.62 * sin(t * .pi), azimuth: .pi * 0.75,
+                                        altitude: .pi / 2 - sin(t * .pi) * 0.85))
             }
-            let color = tools.currentColor.color.opacity(tools.inkTool == .highlighter ? 0.5 : 1)
-            context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round))
+            if let stroke = builder.makeStroke() {
+                let sampled = InkRenderer.sample(stroke)
+                context.withCGContext { InkRenderer.draw(sampled, in: $0, smooth: true) }
+            }
         }
     }
 }

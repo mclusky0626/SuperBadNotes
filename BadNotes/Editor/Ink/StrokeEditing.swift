@@ -31,6 +31,7 @@ nonisolated enum StrokeEditing {
     private static let outlineCache = NSCache<NSNumber, CGPath>()
 
     static func inkOutline(_ s: SampledStroke) -> CGPath {
+        if case let .fountain(outline) = s.imprint { return outline }
         let id = NSNumber(value: s.key.hashValue)
         if let hit = outlineCache.object(forKey: id) { return hit }
         // 화면에 그리는 것과 같은 곡선 + 넉넉한 굵기 (Apple 렌더러·곡선 바깥으로 삐져나온 잉크까지 덮게)
@@ -87,7 +88,7 @@ nonisolated enum StrokeEditing {
             visible = mask.copy(using: &inverse) ?? mask
         } else {
             let margin = max(24, radius * 2)
-            let area = stroke.renderBounds.applying(inverse).insetBy(dx: -margin, dy: -margin)
+            let area = sampled.bounds.applying(inverse).insetBy(dx: -margin, dy: -margin)
             visible = CGPath(rect: area, transform: nil)
         }
         var remaining = visible.subtracting(bite)
@@ -148,14 +149,12 @@ nonisolated enum StrokeEditing {
         return moved
     }
 
-    /// 복제본은 새 획이라 씨앗값을 바꿔야 원본과 구분됨
+    /// 같은 종이 결로 복제하면서도 두 획을 따로 편집할 수 있게, 복제본에 새 생성 시각을 줌.
     static func duplicated(_ stroke: PKStroke, by offset: CGVector) -> PKStroke {
-        PKStroke(ink: stroke.ink, path: stroke.path,
-                 transform: stroke.transform.concatenating(CGAffineTransform(translationX: offset.dx, y: offset.dy)),
-                 mask: stroke.mask,
-                 // 유리펜 표시는 지킴
-                 randomSeed: GlassInk.isGlass(stroke) ? GlassInk.seed(strength: Double(GlassInk.strength(stroke.randomSeed)))
-                     : (InkOrigin.isBadNotes(stroke.randomSeed) ? InkOrigin.badNotesSeed() : UInt32.random(in: 1...UInt32.max)))
+        let path = PKStrokePath(controlPoints: Array(stroke.path), creationDate: Date())
+        return PKStroke(ink: stroke.ink, path: path,
+                        transform: stroke.transform.concatenating(CGAffineTransform(translationX: offset.dx, y: offset.dy)),
+                        mask: stroke.mask, randomSeed: stroke.randomSeed)
     }
 
     static func recolored(_ stroke: PKStroke, to color: UIColor) -> PKStroke {

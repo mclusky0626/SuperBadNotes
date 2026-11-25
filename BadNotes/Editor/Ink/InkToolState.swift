@@ -72,11 +72,11 @@ final class InkToolState {
             }
         }
 
-        /// 만년필은 Apple의 납작한 캘리그라피 펜촉 대신, 굿노트처럼 필압으로 굵기가 변하는 펜
         var inkType: PKInk.InkType {
             switch self {
             case .ballpoint, .glass: .monoline
-            case .fountain, .brush: .pen
+            case .fountain: .fountainPen
+            case .brush: .pen
             case .pencil: .pencil
             }
         }
@@ -85,8 +85,8 @@ final class InkToolState {
         var pressureRange: ClosedRange<CGFloat> {
             switch self {
             case .ballpoint, .pencil, .glass: 1...1
-            case .fountain: 0.7...1.3
-            case .brush: 0.3...1.6
+            case .fountain: 0.75...1.45
+            case .brush: 0.18...2.1
             }
         }
     }
@@ -154,12 +154,6 @@ final class InkToolState {
     var textGlass = false { didSet { save() } }
     var textGlassStrength: Double = 0.4 { didSet { save() } }
 
-    /// 지금 긋는 획의 씨앗값: 유리펜이면 유리 표시를 넣음 (임시 획은 고정)
-    func strokeSeed(preview: Bool) -> UInt32 {
-        guard inkTool == .pen, penStyle == .glass else { return InkOrigin.badNotesSeed(preview: preview) }
-        return GlassInk.seed(strength: glassPenStrength, salt: preview ? 0 : UInt32.random(in: 0...255))
-    }
-
     var tool: Tool = .pen {
         didSet {
             guard tool != oldValue else { return }
@@ -197,7 +191,25 @@ final class InkToolState {
         inkTool == .highlighter ? currentColor.uiColor.withAlphaComponent(0.5) : currentColor.uiColor
     }
 
-    var currentPressureRange: ClosedRange<CGFloat> { inkTool == .highlighter ? 1...1 : penStyle.pressureRange }
+    func makeStrokeBuilder(startTime: TimeInterval, width: CGFloat? = nil,
+                           salt: UInt32 = UInt32.random(in: 1...0xFFFF)) -> StrokeBuilder {
+        // 터치 시작 때 정한 펜촉과 씨앗을 예측선·확정된 획·저장본에서 함께 씀.
+        let seed: UInt32
+        if inkTool == .highlighter {
+            seed = InkOrigin.badNotesSeed(salt: salt)
+        } else {
+            switch penStyle {
+            case .ballpoint: seed = InkOrigin.badNotesSeed(salt: salt)
+            case .fountain: seed = BrushProfile.fountain.seed(salt: salt)
+            case .brush: seed = BrushProfile.brush.seed(salt: salt)
+            case .pencil: seed = BrushProfile.graphite.seed(salt: salt)
+            case .glass: seed = GlassInk.seed(strength: glassPenStrength, salt: salt)
+            }
+        }
+        return StrokeBuilder(inkType: currentInkType, color: currentInkColor, width: width ?? currentWidth,
+                             pressureRange: inkTool == .highlighter ? 1...1 : penStyle.pressureRange,
+                             startTime: startTime, seed: seed)
+    }
 
     var currentColor: RGBAColor {
         inkTool == .highlighter ? highlighterColors[safe: highlighterColorIndex] : penColors[safe: penColorIndex]

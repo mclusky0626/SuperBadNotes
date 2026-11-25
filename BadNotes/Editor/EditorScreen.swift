@@ -36,16 +36,15 @@ struct EditorScreen: View {
         return note.hasCover && note.pageCount > 1 ? 1 : 0
     }
 
-    /// 떠 있는 막대 높이 (내용을 이만큼 비켜 둠)
-    private static let topBar: CGFloat = 118
-    private static let bottomBar: CGFloat = 66
+    @State private var topBarHeight: CGFloat = 0
+    @State private var bottomBarHeight: CGFloat = 0
 
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 backdrop
-                editor(insets: EdgeInsets(top: geo.safeAreaInsets.top + Self.topBar, leading: 0,
-                                          bottom: geo.safeAreaInsets.bottom + Self.bottomBar, trailing: 0))
+                editor(insets: EdgeInsets(top: geo.safeAreaInsets.top + (bridge.chromeHidden ? 0 : topBarHeight), leading: 0,
+                                          bottom: geo.safeAreaInsets.bottom + (bridge.chromeHidden ? 0 : bottomBarHeight), trailing: 0))
                     .id(settings.editMode)
             }
             .ignoresSafeArea()
@@ -54,31 +53,25 @@ struct EditorScreen: View {
             if bridge.chromeHidden {
                 // 막대가 숨었을 때 위쪽을 탭하면 다시 보임
                 Color.clear
-                    .frame(height: 30)
+                    .frame(width: 110, height: 30)
                     .contentShape(Rectangle())
+                    .overlay { Capsule().fill(.secondary.opacity(0.65)).frame(width: 32, height: 4) }
                     .onTapGesture { bridge.chromeHidden = false }
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityLabel("도구 막대 보기")
             } else {
                 EditorChrome(tools: tools, bridge: bridge, mode: settings.editMode, isBoard: note.isBoard,
                              unreadErrors: log.unreadErrors,
                              onClose: onClose, onAddPage: addPage,
                              onPickPhoto: { showPhotos = true }, onPickFile: { showImageFiles = true },
                              onTheme: onTheme, onSettings: onSettings, onLog: onLog)
+                    .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { topBarHeight = $0 }
                     .transition(.move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.96, anchor: .top)))
             }
         }
         .overlay(alignment: .bottom) {
             if !bridge.chromeHidden {
-                VStack(spacing: 10) {
-                    if bridge.atLastPage && !note.isBoard {
-                        Button(action: addPage) {
-                            Label("페이지 추가", systemImage: "plus")
-                                .font(.subheadline.weight(.semibold))
-                                .padding(.horizontal, 6)
-                        }
-                        .buttonStyle(.glass)
-                        .transition(.scale.combined(with: .opacity))
-                    }
-                    HStack(spacing: 10) {
+                HStack(spacing: 6) {
                     ZoomChip(bridge: bridge, settings: settings)
                     StatusCapsule(title: note.title, page: bridge.page, pageCount: bridge.pageCount,
                                   saveState: note.saveState, isBook: bridge.isBook,
@@ -88,10 +81,19 @@ struct EditorScreen: View {
                         jumpText = ""
                         showJump = true
                     }
+                    if bridge.atLastPage && !note.isBoard {
+                        Button(action: addPage) {
+                            Image(systemName: "plus").frame(width: 44, height: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .glassEffect(themes.glass.interactive(), in: .circle)
+                        .accessibilityLabel("페이지 추가")
+                        .transition(.scale.combined(with: .opacity))
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { bottomBarHeight = $0 }
                 .transition(.move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.96, anchor: .bottom)))
             }
         }

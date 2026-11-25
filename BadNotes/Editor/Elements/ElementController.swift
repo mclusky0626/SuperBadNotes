@@ -13,7 +13,7 @@ protocol ElementHost: AnyObject {
     var elementDocument: NoteDocument { get }
     var elementUndo: UndoManager { get }
     /// 페이지 pt → 화면 pt 배율
-    var elementZoom: CGFloat { get }
+    func elementZoom(on page: Int) -> CGFloat
     func elementPageView(_ index: Int) -> PageView?
     func elementUndoChanged()
     func elementShowMenu(_ rect: CGRect, in pageView: PageView)
@@ -73,7 +73,7 @@ final class ElementController: NSObject, UITextViewDelegate {
 
     /// 그 자리 맨 위 요소
     func hit(_ point: CGPoint, page: Int) -> PageElement? {
-        let slop = 6 / max(host?.elementZoom ?? 1, 0.01)
+        let slop = 6 / max(host?.elementZoom(on: page) ?? 1, 0.01)
         return elements(page).last { $0.frame.insetBy(dx: -slop, dy: -slop).contains(point) }
     }
 
@@ -82,7 +82,7 @@ final class ElementController: NSObject, UITextViewDelegate {
         guard !isEditing, let selected, selected.page == page, let element = selectedElement,
               let pageView = host?.elementPageView(page) else { return false }
         if onHandle(point, pageView: pageView) { return true }
-        let slop = 8 / max(host?.elementZoom ?? 1, 0.01)
+        let slop = 8 / max(host?.elementZoom(on: page) ?? 1, 0.01)
         return element.frame.insetBy(dx: -slop, dy: -slop).contains(point)
     }
 
@@ -110,7 +110,7 @@ final class ElementController: NSObject, UITextViewDelegate {
         if let selected, let element = selectedElement, let pageView = host.elementPageView(selected.page) {
             let frame = drag?.frame ?? element.frame
             pageView.selectionFrame.showsHandle = !isEditing
-            pageView.selectionFrame.show(frame, zoom: host.elementZoom)
+            pageView.selectionFrame.show(frame, zoom: host.elementZoom(on: selected.page))
         }
     }
 
@@ -122,7 +122,7 @@ final class ElementController: NSObject, UITextViewDelegate {
 
     private var renderScale: CGFloat {
         let screen = host?.elementPageView(selected?.page ?? 0)?.traitCollection.displayScale ?? 2
-        return min(max(1, (host?.elementZoom ?? 1) * max(screen, 1)), 12)
+        return min(max(1, (host?.elementZoom(on: selected?.page ?? 0) ?? 1) * max(screen, 1)), 12)
     }
 
     // MARK: 고르기
@@ -307,7 +307,7 @@ final class ElementController: NSObject, UITextViewDelegate {
         drag.frame = frame
         self.drag = drag
         pageView.elementView(drag.id)?.preview(frame: frame)
-        pageView.selectionFrame.show(frame, zoom: host?.elementZoom ?? 1)
+        pageView.selectionFrame.show(frame, zoom: host?.elementZoom(on: drag.page) ?? 1)
     }
 
     func endDrag(cancelled: Bool) {

@@ -29,6 +29,16 @@ nonisolated struct CurlGeometry: Sendable {
     /// 다 넘긴 상태 (책등 건너편에 거울처럼)
     func turned(_ y: CGFloat) -> CGPoint { CGPoint(x: 2 * spineX - freeX, y: y) }
 
+    /// 스크롤 위치나 앞뒷면 높이가 다른 펼침면도 접힌 종이와 실제 다음 페이지의 모서리를 맞춘다.
+    func landingTransform(to target: CGRect?, progress: CGFloat) -> CGAffineTransform {
+        guard let target, !target.isEmpty, !rect.isEmpty else { return .identity }
+        let t = progress * progress * (3 - 2 * progress)
+        let foldedX = 2 * spineX - rect.maxX
+        let sx = target.width / rect.width, sy = target.height / rect.height
+        return CGAffineTransform(a: 1 + t * (sx - 1), b: 0, c: 0, d: 1 + t * (sy - 1),
+                                 tx: t * (target.minX - foldedX * sx), ty: t * (target.minY - rect.minY * sy))
+    }
+
     struct State: Equatable {
         /// 말리기 시작하는 선 위의 점과 말리는 쪽 방향 (바깥 가장자리 쪽)
         var point: CGPoint
@@ -186,21 +196,24 @@ nonisolated final class CurlResources: @unchecked Sendable {
         var pageWidth: CGFloat
         var front: MTLTexture
         var back: MTLTexture?
+        var landingTransform: CGAffineTransform = .identity
     }
 
     private func uniforms(_ f: Frame, rect: CGRect) -> [SIMD4<Float>] {
         let s = f.state
+        let t = f.landingTransform
         return [
             SIMD4(Float(f.viewSize.width), Float(f.viewSize.height), Float(rect.minX), Float(rect.minY)),
             SIMD4(Float(rect.width), Float(rect.height), Float(s.point.x), Float(s.point.y)),
             SIMD4(Float(s.normal.dx), Float(s.normal.dy), Float(max(s.radius, 0.0001)), f.back == nil ? 0 : 1),
             // 다 넘길 무렵(반지름이 줄면) 그림자도 같이 옅어짐
             SIMD4(0.26, s.flat ? 1 : 0, Float(0.34 * min(1, s.radius / max(1, f.pageWidth * 0.08))), 0),
+            SIMD4(Float(t.a), Float(t.d), Float(t.tx), Float(t.ty)),
         ]
     }
 
     func encode(_ f: Frame, into encoder: MTLRenderCommandEncoder) {
-        let length = MemoryLayout<SIMD4<Float>>.stride * 4
+        let length = MemoryLayout<SIMD4<Float>>.stride * 5
         // 격자 삼각형은 화면에서 반시계 방향 = 종이 앞면 (뒤집히면 시계 방향 = 뒷면)
         encoder.setFrontFacing(.counterClockwise)
         encoder.setCullMode(.none)
@@ -245,6 +258,7 @@ nonisolated final class CurlResources: @unchecked Sendable {
         float4 b; // 종이 폭, 높이, 말리는 선 점 x, y
         float4 c; // 방향 x, y, 반지름, 뒷면 있음
         float4 d; // 그림자 진하기, 납작함, 바닥 그늘 진하기, -
+        float4 landing; // 원래 종이 좌표에서 내려앉을 화면 좌표로 가는 배율과 이동
     };
 
     struct LeafOut {
@@ -295,7 +309,7 @@ nonisolated final class CurlResources: @unchecked Sendable {
         float2 q; float z; float3 nrm;
         curl(u.a.zw + uv * u.b.xy, u, q, z, nrm);
         LeafOut o;
-        o.position = toClip(q, z, u);
+        o.position = toClip(q * u.landing.xy + u.landing.zw, z, u);
         o.uv = uv;
         o.normal = nrm;
         return o;
@@ -337,7 +351,7 @@ nonisolated final class CurlResources: @unchecked Sendable {
         curl(u.a.zw + uv * u.b.xy, u, q, z, nrm);
         float lift = min(z, 80.0);
         ShadowOut o;
-        o.position = toClip(q + float2(0.16, 0.26) * lift, 0.0, u);
+        o.position = toClip(q * u.landing.xy + u.landing.zw + float2(0.16, 0.26) * lift, 0.0, u);
         o.position.z = 0.95;
         o.alpha = u.d.x * clamp(z / 26.0, 0.0, 1.0);
         return o;
@@ -353,7 +367,7 @@ nonisolated final class CurlResources: @unchecked Sendable {
         FloorOut o;
         o.position = toClip(p, 0.0, u);
         o.position.z = 0.99;
-        o.p = p;
+        o.p = (p - u.landing.zw) / u.landing.xy;
         return o;
     }
 
@@ -376,6 +390,8 @@ final class PageCurlView: MTKView {
     let grabY: CGFloat
     /// 종이 밑에서 드러나는 페이지 자리 (그늘을 드리움). 빈 자리면 nil
     var underRect: CGRect?
+    /// 다 접힌 종이의 뒷면과 교체할 실제 페이지의 화면 좌표
+    var landingRect: CGRect?
     /// 한 쪽 보기: 다 넘긴 종이는 화면 밖이라 끝 무렵 옅어짐
     var fadesWhenTurned = false
 
@@ -475,7 +491,8 @@ final class PageCurlView: MTKView {
               let buffer = resources.queue.makeCommandBuffer(),
               let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { return }
         resources.encode(CurlResources.Frame(viewSize: bounds.size, leafRect: geometry.rect, underRect: underRect,
-                                             state: state, pageWidth: geometry.width, front: front, back: back),
+                                             state: state, pageWidth: geometry.width, front: front, back: back,
+                                             landingTransform: geometry.landingTransform(to: landingRect, progress: state.turned)),
                          into: encoder)
         encoder.endEncoding()
         buffer.commit()

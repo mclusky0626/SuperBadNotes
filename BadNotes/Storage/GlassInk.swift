@@ -123,12 +123,12 @@ nonisolated enum GlassInk {
 nonisolated enum InkOrigin {
     static let tag: UInt32 = 0x6A54_0000
 
-    static func badNotesSeed(preview: Bool = false) -> UInt32 {
-        tag | (preview ? 1 : UInt32.random(in: 1...0xFFFF))
+    static func badNotesSeed(salt: UInt32 = UInt32.random(in: 1...0xFFFF)) -> UInt32 {
+        tag | (salt & 0xFFFF)
     }
 
     static func isBadNotes(_ seed: UInt32) -> Bool {
-        seed & 0xFFFF_0000 == tag || GlassInk.isGlass(seed)
+        seed & 0xFFFF_0000 == tag || GlassInk.isGlass(seed) || BrushProfile(seed: seed) != nil
     }
 }
 

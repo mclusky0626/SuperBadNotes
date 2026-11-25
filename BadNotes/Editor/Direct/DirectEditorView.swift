@@ -57,7 +57,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     private var zoomLocked = AppSettings.shared.zoomLocked
     private var lockedRatio: CGFloat = 1
 
-    private var laidOutWidth: CGFloat = 0
+    private var laidOutSize: CGSize = .zero
     private var didInitialScroll = false
     private var lastScrollY: CGFloat = 0
     private var lastChromeToggle: CFTimeInterval = 0
@@ -67,7 +67,17 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     /// 떠 있는 도구 막대 높이만큼 내용을 비켜 둠
     var chromeInsets: UIEdgeInsets = .zero {
-        didSet { if chromeInsets != oldValue { updateInsets() } }
+        didSet {
+            guard chromeInsets != oldValue else { return }
+            endFlip(complete: true)
+            let atTop = abs(scrollView.contentOffset.y + scrollView.contentInset.top) < 1
+            if bookMode, !useTwoUp, laidOutSize != .zero, abs(scrollView.zoomScale - fitZoom) < 0.001 {
+                layoutPages()
+            } else {
+                updateInsets()
+                if atTop { scrollView.contentOffset.y = -scrollView.contentInset.top }
+            }
+        }
     }
 
     private enum Action {
@@ -217,10 +227,11 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     func setPageView(book: Bool, twoUp newTwoUp: Bool) {
         guard !document.isBoard else { return }
         guard book != bookMode || newTwoUp != twoUp else { return }
+        endFlip(complete: true)
         let keep = bridge.page
         bookMode = book
         twoUp = newTwoUp
-        guard laidOutWidth > 0 else { return }
+        guard laidOutSize.width > 0 else { return }
         currentRow = PageRows.row(containing: keep, in: PageRows.make(count: pageViews.count, twoUp: useTwoUp,
                                                                      coverAlone: document.hasCover))
         layoutPages()
@@ -249,11 +260,11 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         super.layoutSubviews()
         scrollView.frame = bounds
         wetView.frame = bounds
-        guard bounds.width > 0, abs(bounds.width - laidOutWidth) > 0.5 else { return }
+        guard bounds.width > 0, bounds.height > 0, bounds.size != laidOutSize else { return }
         // 넘기는 중에 화면이 돌면 그 자리에서 다 넘김
         endFlip(complete: true)
         let keepPage = didInitialScroll ? bridge.page : initialPage
-        laidOutWidth = bounds.width
+        laidOutSize = bounds.size
         currentRow = PageRows.row(containing: keepPage, in: PageRows.make(count: pageViews.count, twoUp: useTwoUp,
                                                                          coverAlone: document.hasCover))
         layoutPages()
@@ -275,7 +286,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     }
 
     /// 페이지를 원래 크기(pt)로 줄(한 쪽 / 두 쪽)마다 놓고 확대 배율을 정함.
-    /// 세로 보기: 줄을 위아래로 쌓아 폭에 맞춤. 책 보기: 지금 줄만 보이고 화면 안에 다 들어오게
+    /// 펼침면은 화면 폭에, 한 쪽 책 보기는 보이는 영역에 맞춘다.
     private func layoutPages() {
         if document.isBoard {
             layoutBoard()
@@ -283,51 +294,13 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         }
         rows = PageRows.make(count: pageViews.count, twoUp: useTwoUp, coverAlone: document.hasCover)
         currentRow = min(max(currentRow, 0), max(0, rows.count - 1))
-        let maxWidth = pageViews.map(\.bounds.width).max() ?? 1
-        let gap = max(12, maxWidth * 0.025)
-        let spine: CGFloat = 2
-        func width(_ row: [Int]) -> CGFloat {
-            row.reduce(0) { $0 + pageViews[$1].bounds.width } + spine * CGFloat(max(0, row.count - 1))
-        }
-        func height(_ row: [Int]) -> CGFloat { row.map { pageViews[$0].bounds.height }.max() ?? 0 }
-        let spread = useTwoUp
-        func place(_ row: [Int], x startX: CGFloat, y: CGFloat) {
-            let h = height(row)
-            if spread {
-                // 두 쪽: 책등을 가운데 두고 제자리에 (혼자인 쪽도 책처럼 왼쪽·오른쪽 자리)
-                let spineX = gap + maxWidth
-                for (index, right) in zip(row, PageRows.rightSlots(row, coverAlone: document.hasCover)) {
-                    let view = pageViews[index]
-                    let x = right ? spineX + spine : spineX - view.bounds.width
-                    view.frame.origin = CGPoint(x: x, y: y + (h - view.bounds.height) / 2)
-                }
-                return
-            }
-            var x = startX
-            for index in row {
-                let view = pageViews[index]
-                view.frame.origin = CGPoint(x: x, y: y + (h - view.bounds.height) / 2)
-                x += view.bounds.width + spine
-            }
-        }
-
-        let natural: CGSize
-        if bookMode, rows.indices.contains(currentRow) {
-            let row = rows[currentRow]
-            for view in pageViews { view.isHidden = !row.contains(view.index) }
-            let full = spread ? maxWidth * 2 + spine : width(row)
-            place(row, x: gap + (full - width(row)) / 2, y: gap)
-            natural = CGSize(width: full + gap * 2, height: height(row) + gap * 2)
-        } else {
-            for view in pageViews { view.isHidden = false }
-            let contentWidth = spread ? maxWidth * 2 + spine : rows.map(width).max() ?? maxWidth
-            var y = gap
-            for row in rows {
-                place(row, x: gap + (contentWidth - width(row)) / 2, y: y)
-                y += height(row) + gap
-            }
-            natural = CGSize(width: contentWidth + gap * 2, height: y)
-        }
+        let visibleRows = bookMode && rows.indices.contains(currentRow) ? [rows[currentRow]] : rows
+        let arrangement = PageArrangement(sizes: pageViews.map(\.bounds.size), rows: visibleRows,
+                                          twoUp: useTwoUp, coverAlone: document.hasCover)
+        let visible = bookMode ? Set(visibleRows.joined()) : nil
+        for view in pageViews { view.isHidden = visible.map { !$0.contains(view.index) } ?? false }
+        for placement in arrangement.placements { placement.apply(to: pageViews[placement.index]) }
+        let natural = arrangement.size
 
         scrollView.minimumZoomScale = 0.01
         scrollView.maximumZoomScale = 100
@@ -335,8 +308,8 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         contentView.frame = CGRect(origin: .zero, size: natural)
         scrollView.contentSize = natural
 
-        let available = bounds.height - chromeInsets.top - max(chromeInsets.bottom, 60)
-        fitZoom = bookMode ? min(bounds.width / natural.width, max(0.1, available / natural.height))
+        let available = bounds.height - chromeInsets.top - chromeInsets.bottom
+        fitZoom = bookMode && !useTwoUp ? min(bounds.width / natural.width, max(0.1, available / natural.height))
                            : bounds.width / natural.width
         scrollView.minimumZoomScale = fitZoom * 0.5
         scrollView.maximumZoomScale = fitZoom * 12
@@ -423,7 +396,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     private func updateInsets() {
         let side = max(0, (scrollView.bounds.width - scrollView.contentSize.width) / 2)
         var top = chromeInsets.top
-        var bottom = max(chromeInsets.bottom, keyboardOverlap + 16)
+        var bottom = max(chromeInsets.bottom, keyboardOverlap > 0 ? keyboardOverlap + 16 : 0)
         if bookMode {
             let free = scrollView.bounds.height - scrollView.contentSize.height - top - bottom
             if free > 0 {
@@ -445,7 +418,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         let frame = contentView.convert(pageViews[index].frame, to: scrollView)
         let top = -scrollView.contentInset.top
         let bottom = max(top, scrollView.contentSize.height - scrollView.bounds.height + scrollView.contentInset.bottom)
-        let y = min(max(frame.minY - scrollView.contentInset.top - 12, top), bottom)
+        let y = min(max(frame.minY - scrollView.contentInset.top, top), bottom)
         scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: y), animated: animated)
     }
 
@@ -499,8 +472,12 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     /// 넘기는 중인 종이 한 장
     private struct Flip {
         let fromRow: Int
+        let fromZoom: CGFloat
+        let fromOffset: CGPoint
         let forward: Bool
         let curl: PageCurlView
+        /// 펼침면에 내려앉을 때까지 Metal 종이의 뒷면으로만 보이는 페이지
+        let backPage: PageView?
         /// 다 넘길 때까지 그대로 덮어 두는 옛 페이지 사진
         let covers: [UIView]
         /// true: 펴진 종이가 넘어감 / false: 넘어가 있던 종이가 돌아옴 (한 쪽 보기에서 앞 페이지로)
@@ -577,6 +554,8 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         prepareTurn()
         let forward = row > currentRow
         let fromRow = currentRow
+        let fromZoom = scrollView.zoomScale
+        let fromOffset = scrollView.contentOffset
         let oldRow = rows[currentRow], newRow = rows[row]
         let displayScale = max(1, traitCollection.displayScale)
         func frame(_ index: Int) -> CGRect { pageViews[index].convert(pageViews[index].bounds, to: self) }
@@ -595,6 +574,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
         let geometry: CurlGeometry
         let front: CGImage?
         var back: CGImage?
+        var backPage: PageView?
         let under: CGRect?
         var covers: [UIView] = []
         let startsFlat: Bool
@@ -610,8 +590,9 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             front = pageViews[leaf].image(pointScale: pixels(leaf, width: rect.width))
             if let other = slot(oldRow, right: !forward), let shot = cover(other) { covers.append(shot) }
             showRow(row)
-            back = slot(newRow, right: !forward).flatMap {
-                pageViews[$0].image(pointScale: pixels($0, width: rect.width))
+            if let index = slot(newRow, right: !forward) {
+                backPage = pageViews[index]
+                back = pageViews[index].image(pointScale: pixels(index, width: rect.width))
             }
             under = slot(newRow, right: forward).map(frame)
             startsFlat = true
@@ -649,20 +630,30 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             return nil
         }
         curl.underRect = under
+        curl.landingRect = backPage.map { frame($0.index) }
         curl.fadesWhenTurned = !useTwoUp
+        // 새 줄에서 미리 드러날 쪽은 넘기는 종이 바로 아래뿐이다.
+        // 반대쪽은 원래 비어 있던 자리(표지 옆 등)까지 그대로 보여 준다.
+        backPage?.isHidden = true
         for shot in covers { insertSubview(shot, belowSubview: wetView) }
         insertSubview(curl, belowSubview: wetView)
         curl.setFinger(start)
-        return Flip(fromRow: fromRow, forward: forward, curl: curl, covers: covers, startsFlat: startsFlat,
-                    gain: useTwoUp ? 1 : 1.35)
+        return Flip(fromRow: fromRow, fromZoom: fromZoom, fromOffset: fromOffset, forward: forward, curl: curl,
+                    backPage: backPage, covers: covers, startsFlat: startsFlat, gain: useTwoUp ? 1 : 1.35)
     }
 
     /// complete: false면 처음 줄로 되돌림
-    private func endFlip(complete: Bool) {
+    func endFlip(complete: Bool) {
         guard let flip else { return }
         self.flip = nil
         flip.curl.stop()
-        if !complete { showRow(flip.fromRow) }
+        if complete {
+            flip.backPage?.isHidden = false
+        } else {
+            showRow(flip.fromRow)
+            scrollView.zoomScale = flip.fromZoom
+            scrollView.contentOffset = flip.fromOffset
+        }
         flip.curl.removeFromSuperview()
         for shot in flip.covers { shot.removeFromSuperview() }
     }
@@ -779,9 +770,8 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             if view.frame.minY <= centerY { current = index } else { break }
         }
         if bridge.page != current { bridge.page = current }
-        if let last = pageViews.last {
-            let frame = contentView.convert(last.frame, to: scrollView)
-            let atEnd = frame.maxY <= scrollView.contentOffset.y + scrollView.bounds.height + 40
+        if !pageViews.isEmpty {
+            let atEnd = scrollView.contentSize.height <= scrollView.contentOffset.y + scrollView.bounds.height + 40
             if bridge.atLastPage != atEnd { bridge.atLastPage = atEnd }
         }
     }
@@ -789,6 +779,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     /// 문서 맨 뒤에 페이지가 들어왔을 때 (NoteDocument.appendPage 다음)
     func pageAdded(_ index: Int) {
         guard index == pageViews.count, let page = document.pdf.page(at: index) else { return }
+        endFlip(complete: true)
         let view = PageView(index: index, page: page, size: PageGeometry(page: page).canvasSize,
                             ink: PageInk(drawing: document.drawing(for: index)), documentLock: document.renderLock,
                                 board: document.isBoard)
@@ -837,7 +828,9 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     // MARK: 입력
 
     private func pageView(at point: CGPoint) -> PageView? {
-        pageViews.first { !$0.isHidden && $0.frame.insetBy(dx: -24, dy: -12).contains(point) }
+        // 책등 바로 오른쪽 터치가 왼쪽 페이지의 여유 범위로 들어가지 않게 실제 종이를 먼저 찾는다.
+        pageViews.first { !$0.isHidden && $0.frame.contains(point) }
+            ?? pageViews.first { !$0.isHidden && $0.frame.insetBy(dx: -24, dy: -12).contains(point) }
     }
 
     private func samples(_ touch: UITouch, _ event: UIEvent?, in view: UIView, predicted: Bool = false) -> [InputSample] {
@@ -883,13 +876,11 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             return false
         case .pen, .highlighter:
             clearSelection()
-            var newBuilder = StrokeBuilder(inkType: tools.currentInkType, color: tools.currentInkColor,
-                                           width: tools.currentWidth, pressureRange: tools.currentPressureRange,
-                                           startTime: touch.timestamp)
+            var newBuilder = tools.makeStrokeBuilder(startTime: touch.timestamp)
             for sample in samples(touch, event, in: pageView) { newBuilder.add(sample) }
             builder = newBuilder
             action = .drawing(pageView)
-            wetView.setActive(newBuilder.makeStroke(seed: tools.strokeSeed(preview: true)), page: pageView)
+            wetView.setActive(newBuilder.makeStroke(), page: pageView)
 
         case .eraser:
             clearSelection()
@@ -925,7 +916,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
             guard builder != nil else { return }
             for sample in samples(touch, event, in: pageView) { builder?.add(sample) }
             let predicted = samples(touch, event, in: pageView, predicted: true)
-            wetView.setActive(builder?.makeStroke(predicted: predicted, seed: tools.strokeSeed(preview: true)), page: pageView)
+            wetView.setActive(builder?.makeStroke(predicted: predicted), page: pageView)
 
         case .erasing(let pageView, let before, var last):
             for sample in samples(touch, event, in: pageView) {
@@ -964,7 +955,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
                let straight = finalBuilder.straightened() {
                 finalBuilder = straight
             }
-            guard let stroke = finalBuilder.makeStroke(seed: tools.strokeSeed(preview: false)) else { return }
+            guard let stroke = finalBuilder.makeStroke() else { return }
             let before = pageView.ink.currentDrawing()
             var after = before
             after.strokes.append(stroke)
@@ -1393,7 +1384,9 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     var elementDocument: NoteDocument { document }
     var elementUndo: UndoManager { history }
-    var elementZoom: CGFloat { scrollView.zoomScale }
+    func elementZoom(on page: Int) -> CGFloat {
+        scrollView.zoomScale * (elementPageView(page)?.transform.a ?? 1)
+    }
 
     func elementPageView(_ index: Int) -> PageView? {
         pageViews.indices.contains(index) ? pageViews[index] : nil
@@ -1551,8 +1544,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     }
 
     private func demoStroke(_ points: [CGPoint], on page: PageView, force: (Int) -> CGFloat) {
-        var demo = StrokeBuilder(inkType: tools.currentInkType, color: tools.currentInkColor,
-                                 width: tools.currentWidth, pressureRange: tools.currentPressureRange, startTime: 0)
+        var demo = tools.makeStrokeBuilder(startTime: 0)
         for (i, point) in points.enumerated() {
             demo.add(InputSample(location: point, time: Double(i) * 0.008, force: force(i), azimuth: 0, altitude: .pi / 2))
         }

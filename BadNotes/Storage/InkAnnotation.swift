@@ -111,7 +111,10 @@ nonisolated final class InkAnnotation: PDFAnnotation {
     init(drawing: PKDrawing, geometry: PageGeometry, bakeGlass: Bool = true) throws {
         let payload = try InkPayload.encode(drawing)
         // 주석 영역은 필기가 있는 곳만 (다른 앱에서 페이지 전체가 선택되지 않게)
-        var rect = drawing.bounds.applying(geometry.canvasToPage)
+        let appearanceBounds = drawing.strokes.reduce(into: CGRect.null) { bounds, stroke in
+            bounds = bounds.union(BrushImprint.enclosingBounds(of: stroke))
+        }
+        var rect = appearanceBounds.applying(geometry.canvasToPage)
             .insetBy(dx: -2, dy: -2)
             .intersection(geometry.box)
         if rect.isNull || rect.width < 1 || rect.height < 1 {
