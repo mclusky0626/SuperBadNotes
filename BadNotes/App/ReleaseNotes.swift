@@ -12,6 +12,10 @@ struct AppRelease: Identifiable {
     var id: String { version }
 
     static let history = [
+        AppRelease(version: "1.5.2.1", changes: [
+            Change(icon: "clock.arrow.circlepath", title: "변경 기록과 업데이트 안내",
+                   detail: "설정에서 이전 버전의 변경 기록을 확인하고, 업데이트 안내 자동 표시를 켜거나 끌 수 있어요.")
+        ]),
         AppRelease(version: "1.5.2", changes: [
             Change(icon: "map", title: "화이트보드 미니맵",
                    detail: "보드 전체에서 지금 보는 위치를 확인하고 미니맵을 눌러 이동해요. 자주 찾는 위치는 이름을 붙여 노트에 저장할 수 있어요.")
@@ -35,6 +39,20 @@ struct AppRelease: Identifiable {
                    detail: "모서리를 끌어 페이지를 넘겨요. 가로에서는 표지가 오른쪽, 마지막에 홀로 남은 속지가 왼쪽에 놓여요."),
             Change(icon: "arrow.up.left.and.arrow.down.right", title: "확대 고정과 화이트보드 확장",
                    detail: "페이지를 넘겨도 선택한 배율을 유지할 수 있어요. 화이트보드 가장자리에서 쓰면 작업 공간이 늘어나요.")
+        ]),
+        AppRelease(version: "1.3", changes: [
+            Change(icon: "book.pages", title: "책처럼 넘기는 노트",
+                   detail: "페이지를 책처럼 넘기고 가로 화면에서 두 쪽을 펼쳐 볼 수 있어요. 도구 막대와 글꼴, 유리 투명도도 개선했어요.")
+        ]),
+        AppRelease(version: "1.2", changes: [
+            Change(icon: "text.bubble", title: "텍스트와 메모지, 사진",
+                   detail: "페이지에 텍스트 상자와 유리 메모지, 사진을 넣을 수 있어요. Apple 필기 도구도 사용할 수 있어요."),
+            Change(icon: "eraser", title: "지우개와 표지 개선",
+                   detail: "지우개와 노트북 표지를 새롭게 정리했어요.")
+        ]),
+        AppRelease(version: "1.0", changes: [
+            Change(icon: "pencil.and.scribble", title: "BadNotes 시작",
+                   detail: "PDF에 필기하고 저장하는 BadNotes의 첫 버전이에요.")
         ])
     ]
 
@@ -50,7 +68,7 @@ struct AppRelease: Identifiable {
               release.version.compare(defaults.string(forKey: key) ?? "", options: .numeric) == .orderedDescending
         else { return nil }
         defaults.set(release.version, forKey: key)
-        return release
+        return AppSettings.shared.showUpdateNotes ? release : nil
     }
 }
 

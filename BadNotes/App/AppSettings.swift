@@ -67,6 +67,11 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(twoUpLandscape, forKey: Keys.twoUpLandscape) }
     }
 
+    /// 새 버전의 변경 사항을 시작할 때 표시
+    var showUpdateNotes: Bool {
+        didSet { UserDefaults.standard.set(showUpdateNotes, forKey: Keys.showUpdateNotes) }
+    }
+
     /// 새 노트북·화이트보드의 기본 파일 형식
     var newFormat: NoteFormat {
         didSet { UserDefaults.standard.set(newFormat.rawValue, forKey: Keys.newFormat) }
@@ -78,6 +83,7 @@ final class AppSettings {
     }
 
     private enum Keys {
+        static let showUpdateNotes = "showUpdateNotes"
         static let zoomLocked = "zoomLocked"
         static let newFormat = "newFormat"
         static let pageTurn = "pageTurn"
@@ -90,6 +96,7 @@ final class AppSettings {
 
     private init() {
         let defaults = UserDefaults.standard
+        showUpdateNotes = defaults.object(forKey: Keys.showUpdateNotes) as? Bool ?? true
         editMode = EditMode(rawValue: defaults.string(forKey: Keys.editMode) ?? "") ?? .direct
         fingerDrawing = defaults.bool(forKey: Keys.fingerDrawing)
         tapToUndo = defaults.object(forKey: Keys.tapToUndo) as? Bool ?? true
