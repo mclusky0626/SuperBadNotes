@@ -1043,6 +1043,7 @@ nonisolated enum SelfTest {
         _ = try PDFInkWriter.apply(content: [0: PageContent(drawing: d, elements: [sticky])], images: [:], to: url)
         await MainActor.run { LegacyMigration.skipForTesting() }
         let note = try await NoteDocument.open(url)
+        await note.addBoardPlace(" 첫 메모 ", at: CGPoint(x: 80, y: 220))
         let grown = await note.growBoard(left: 1600, top: 0, right: 1600, bottom: 1600)
         await note.flush(reason: "점검")
         let loaded = try NoteLoader.load(url)
@@ -1051,6 +1052,27 @@ nonisolated enum SelfTest {
         r.check("화이트보드 늘리기: 가장자리 쪽으로 크기가 늘고 파일에도 저장",
                 abs(size.width - (start.width + 3200)) < 1 && abs(size.height - (start.height + 1600)) < 1
                     && grown?.shift == CGPoint(x: 1600, y: 0), "\(size) \(String(describing: grown))")
+        let reopened = try await NoteDocument.open(url)
+        await MainActor.run {
+            let place = reopened.boardPlaces.first
+            r.check("미니맵: 보드를 늘리고 다시 열어도 저장한 위치가 메모를 따라감",
+                    place?.name == "첫 메모" && place?.point == CGPoint(x: 1680, y: 220))
+            for apple in [false, true] {
+                let bridge = EditorBridge()
+                let view: UIView = apple ? PencilKitEditorView(document: reopened, bridge: bridge)
+                    : DirectEditorView(document: reopened, tools: .shared, bridge: bridge)
+                view.frame = CGRect(x: 0, y: 0, width: 1024, height: 768)
+                view.layoutIfNeeded()
+                let map = bridge.boardMap
+                let target = CGPoint(x: 2000, y: 1500)
+                map.jump(to: target)
+                view.layoutIfNeeded()
+                r.check("미니맵: \(apple ? "Apple" : "직접") 도구에서 누른 위치가 화면 중앙",
+                        map.size == size && abs(map.visible.midX - target.x) < 1 && abs(map.visible.midY - target.y) < 1)
+                (view as? DirectEditorView)?.prepareForRemoval()
+                (view as? PencilKitEditorView)?.prepareForRemoval()
+            }
+        }
         let strokeX = loaded.drawings[0]?.bounds.minX ?? 0, stickyX = loaded.elements[0]?.first?.x ?? 0
         r.check("화이트보드 늘리기: 왼쪽으로 늘리면 필기·메모지도 그만큼 밀려서 제자리",
                 abs(strokeX - (d.bounds.minX + 1600)) < 2 && abs(stickyX - 1650) < 0.5, "\(strokeX) \(stickyX)")

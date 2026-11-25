@@ -256,7 +256,13 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
 
     // MARK: 배치
 
+    private func updateBoardMap() {
+        guard document.isBoard, let board = pageViews.first, bridge.owner == ObjectIdentifier(self) else { return }
+        bridge.boardMap.update(scrollView, board: board, insets: chromeInsets)
+    }
+
     override func layoutSubviews() {
+        defer { updateBoardMap() }
         super.layoutSubviews()
         scrollView.frame = bounds
         wetView.frame = bounds
@@ -717,6 +723,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        defer { updateBoardMap() }
         reportZoom()
         updateInsets()
         wetView.refresh()
@@ -734,6 +741,7 @@ final class DirectEditorView: UIView, UIScrollViewDelegate, UIGestureRecognizerD
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        defer { updateBoardMap() }
         updateCurrentPage()
         if wetView.hasContent { wetView.refresh() }
         if selection != nil || elements.selected != nil { editMenu?.dismissMenu() }

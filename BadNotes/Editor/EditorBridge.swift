@@ -11,6 +11,7 @@ import Observation
 
 @Observable
 final class EditorBridge {
+    let boardMap = BoardMapState()
     var page = 0
     var pageCount = 0
     var canUndo = false

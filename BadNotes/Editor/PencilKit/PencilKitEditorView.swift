@@ -191,7 +191,13 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
 
     // MARK: 배치
 
+    private func updateBoardMap() {
+        guard document.isBoard, let board = pageViews.first, bridge.owner == ObjectIdentifier(self) else { return }
+        bridge.boardMap.update(canvas, board: board, insets: chromeInsets)
+    }
+
     override func layoutSubviews() {
+        defer { updateBoardMap() }
         super.layoutSubviews()
         canvas.frame = bounds
         guard bounds.width > 0, bounds.height > 0, bounds.size != laidOutSize else { return }
@@ -377,6 +383,7 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     // MARK: 스크롤
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        defer { updateBoardMap() }
         reportZoom()
         syncUnderlay()
         elements.updateSelectionFrame()
@@ -389,6 +396,7 @@ final class PencilKitEditorView: UIView, PKCanvasViewDelegate, PKToolPickerObser
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        defer { updateBoardMap() }
         updateCurrentPage()
         if elements.selected != nil { editMenu?.dismissMenu() }
         updateChromeVisibility()

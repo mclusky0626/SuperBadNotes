@@ -23,6 +23,16 @@ final class NoteDocument {
         case failed(String)
     }
 
+    private(set) var boardPlaces: [BoardPlace] = []
+    private(set) var boardMapRevision = 0
+
+    func addBoardPlace(_ name: String, at point: CGPoint) {
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isBoard, !title.isEmpty, point.x.isFinite, point.y.isFinite else { return }
+        boardPlaces.append(BoardPlace(id: UUID(), name: title, point: point))
+        markChanged(0)
+    }
+
     let url: URL
     @ObservationIgnored let pdf: PDFDocument
     private(set) var saveState: SaveState = .saved(nil)
@@ -91,6 +101,7 @@ final class NoteDocument {
         self.paperSpec = PaperSpec.from(documentAttributes: opened.loaded.pdf.documentAttributes)
         self.hasCover = PaperSpec.hasCover(opened.loaded.pdf.documentAttributes)
         self.isBoard = PaperSpec.isBoard(opened.loaded.pdf.documentAttributes)
+        if isBoard { boardPlaces = BoardPlace.load(from: pdf) }
         // 큰 파일일수록 저장 간격을 늘림 (10MB당 1.5초, 3~15초)
         let seconds = min(15, max(3, Double(opened.fileSize) / 10_000_000 * 1.5))
         self.saveDelay = .milliseconds(Int(seconds * 1000))
@@ -143,6 +154,10 @@ final class NoteDocument {
             page.setBounds(box, for: .cropBox)
         }
         if shiftX != 0 || shiftY != 0 {
+            for i in boardPlaces.indices {
+                boardPlaces[i].point.x += shiftX
+                boardPlaces[i].point.y += shiftY
+            }
             let shift = CGAffineTransform(translationX: shiftX, y: shiftY)
             if let drawing = drawings[0] { drawings[0] = drawing.transformed(using: shift) }
             if var list = elementsByPage[0] {
@@ -199,6 +214,7 @@ final class NoteDocument {
     }
 
     private func markChanged(_ page: Int) {
+        if isBoard { boardMapRevision += 1 }
         revision[page, default: 0] += 1
         dirty.insert(page)
         if dirtySince == nil { dirtySince = Date() }
@@ -308,6 +324,7 @@ final class NoteDocument {
         let images = imageStore.filter { used.contains($0.key) }
         let revisions = Dictionary(uniqueKeysWithValues: dirty.map { ($0, revision[$0] ?? 0) })
         let appends = pendingAppends
+        let places = isBoard ? boardPlaces : nil
         let boardSize = pendingBoardSize
         let url = url
         let needsBackup = !backedUpThisSession
@@ -322,7 +339,7 @@ final class NoteDocument {
             }
             return Result {
                 try PDFInkWriter.apply(content: pages, images: images, appending: appends,
-                                       pageSizes: boardSize.map { [0: $0] } ?? [:], to: url)
+                                       pageSizes: boardSize.map { [0: $0] } ?? [:], boardPlaces: places, to: url)
             }
         }.value
         isSaving = false

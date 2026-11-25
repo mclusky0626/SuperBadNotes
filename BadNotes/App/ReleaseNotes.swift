@@ -12,6 +12,10 @@ struct AppRelease: Identifiable {
     var id: String { version }
 
     static let history = [
+        AppRelease(version: "1.5.2", changes: [
+            Change(icon: "map", title: "화이트보드 미니맵",
+                   detail: "보드 전체에서 지금 보는 위치를 확인하고 미니맵을 눌러 이동해요. 자주 찾는 위치는 이름을 붙여 노트에 저장할 수 있어요.")
+        ]),
         AppRelease(version: "1.5.1", changes: [
             Change(icon: "eraser", title: "부분 지우개 반응 개선",
                    detail: "노트에서 문지른 자리만 지워져요. 유리펜도 지운 상태로 저장하고 다시 열 수 있어요."),

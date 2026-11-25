@@ -69,6 +69,13 @@ struct EditorScreen: View {
                     .transition(.move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.96, anchor: .top)))
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if note.isBoard {
+                BoardMinimap(note: note, map: bridge.boardMap)
+                    .padding(.trailing, 8)
+                    .padding(.bottom, bridge.chromeHidden ? 8 : bottomBarHeight + 6)
+            }
+        }
         .overlay(alignment: .bottom) {
             if !bridge.chromeHidden {
                 HStack(spacing: 6) {

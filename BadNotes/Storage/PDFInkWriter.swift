@@ -54,11 +54,12 @@ nonisolated enum PDFInkWriter {
     /// `images`: 요소가 쓰는 사진 원본. `appending`: 맨 뒤에 붙일 페이지들 (한 장짜리 PDF 데이터).
     /// 페이지를 먼저 붙여서 새 페이지 내용도 같이 저장됨
     static func apply(content pages: [Int: PageContent], images: [String: Data], appending newPages: [Data] = [],
-                      pageSizes: [Int: CGSize] = [:], to url: URL) throws -> Report {
+                      pageSizes: [Int: CGSize] = [:], boardPlaces: [BoardPlace]? = nil, to url: URL) throws -> Report {
         let start = Date()
         let data = try NoteLoader.coordinatedRead(url)
         guard let document = PDFDocument(data: data) else { throw WriteError.unreadable }
         if document.isLocked { throw WriteError.locked }
+        if let boardPlaces { try BoardPlace.write(boardPlaces, to: document) }
         // 화이트보드가 늘어났으면 페이지 크기부터 (필기·요소는 새 크기 기준 좌표로 넘어옴)
         for (index, size) in pageSizes {
             guard let page = document.page(at: index) else { continue }
